@@ -15,7 +15,7 @@
       <div>
         <p class="eyebrow">ONTO-RESEARCH</p>
         <h1>登录工作台</h1>
-        <p class="lede">用受邀账号进入你的私有研究工作区。</p>
+        <p class="lede">登录你的私有研究工作区。</p>
       </div>
     </header>
     <form id="login-form" class="panel-card login-form" method="post" action="/auth/login">
@@ -30,6 +30,25 @@
       <button type="submit" class="btn primary lg" disabled>登录</button>
       <p id="login-error" class="test-result bad" role="alert" hidden></p>
     </form>
+    <section id="register-panel" class="panel-card login-form" hidden>
+      <h2>注册或登录</h2>
+      <form id="sms-send" class="login-form" hidden>
+        <label class="field">
+          <span>中国大陆手机号</span>
+          <input name="phone" type="tel" autocomplete="tel" maxlength="32" required>
+        </label>
+        <button class="btn lg" type="submit">发送验证码</button>
+      </form>
+      <form id="sms-complete" class="login-form" hidden>
+        <label class="field">
+          <span>短信验证码</span>
+          <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+        </label>
+        <button class="btn primary lg" type="submit">验证并继续</button>
+      </form>
+      <button class="btn lg" id="wechat-start" type="button" hidden>微信扫码</button>
+      <p id="register-message" class="test-result" aria-live="polite" hidden></p>
+    </section>
   </main>
   <script type="module" src="/static/login.js"></script>
 </body>

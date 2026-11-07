@@ -18,7 +18,7 @@ python3 -m venv .venv
 
 ## CloudBase 云托管预发布
 
-容器监听 8080，健康检查为 `GET /healthz`。工作台使用 CloudBase Auth 的账号密码登录，仅接受受邀用户的 ID。
+容器监听 8080，健康检查为 `GET /healthz`。工作台通过 CloudBase Auth 登录，默认仅接受受邀账号。
 
 | 变量 | 用途 |
 | --- | --- |
@@ -26,6 +26,7 @@ python3 -m venv .venv
 | `WORKBENCH_CLOUDBASE_ENV_ID` | 提供身份认证的 CloudBase 环境 ID |
 | `WORKBENCH_PUBLIC_ORIGIN` | 浏览器访问工作台的 HTTPS 来源，不带路径或末尾斜杠 |
 | `WORKBENCH_ALLOWED_USER_IDS` | 受邀账号的 CloudBase 用户 ID，以逗号分隔 |
+| `WORKBENCH_REGISTRATION_PROVIDERS` | 自助注册渠道，可填 `sms`、`wechat` 或 `sms,wechat`，默认关闭 |
 | `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`WORKBENCH_MODEL` | 可选模型服务配置 |
 
 目前使用单个工作台实例。项目连接依赖 PostgreSQL 会话级 `search_path`。启动时初始化 `onto_research` 注册表，首次创建项目时会在 `onto_research_p_*` 下应用项目迁移，因此数据库登录角色需要访问注册表并创建项目 schema。
@@ -41,6 +42,14 @@ python3 -m venv .venv
 本地单用户 Web 入口只读取未归属项目。日常开发请配置独立的本地开发库。CLI 和本地 stdio MCP 使用数据库运营凭据，仅供受信任的运营者操作。
 
 私有数据启用后，回滚使用支持账号隔离的版本。旧版共享口令服务接入同一数据库时可读取项目，因此切流后应关闭旧版访问入口，并保持项目 schema 仅供后端访问。
+
+### 自助注册
+
+- 短信需要上海地域、已启用的短信验证码登录，以及已通过审核的短信签名和模板。页面接受中国大陆手机号，验证码验证后由 CloudBase 创建用户或登录现有用户。应用对发送尝试设有同号码 60 秒冷却、滚动 24 小时 5 次，以及全站每分钟 10 次、滚动 24 小时 100 次上限。
+- 微信需要配置 CloudBase 的微信开放平台网站应用身份源并启用自动注册。将工作台 HTTPS 域名加入 CloudBase 安全域名及微信授权回调域名，应用回调路径固定为 `/auth/wechat/callback`。AppSecret 在 CloudBase 控制台配置。
+- 两种方式以 CloudBase 返回的 UID 进入工作区。同一 UID 复用既有项目；尚未关联到原账号的手机号或微信会进入自己的工作区。工作台的注册记录仅保存 UID、首次注册渠道和时间。
+
+按渠道配置后做一次真实注册、退出和重新登录验收，再对用户开放。关闭渠道会收起其注册和登录入口，已有工作区和当前有效会话仍可使用。需要封禁账号时，先在 CloudBase 停用用户，再移除工作台的注册记录或邀请名单条目以撤销访问。
 
 本地配置、密钥、测试数据和虚拟环境都应排除在上传目录外。上传到云托管的源代码目录仅需 `Dockerfile`、`.dockerignore`、`pyproject.toml`、`ontology/` 和 `workbench/`。容器进程以非 root 用户运行。
 
