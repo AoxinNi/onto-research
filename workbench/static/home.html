@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>本体项目 · 本体工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%2305060a'/%3E%3Ccircle cx='16' cy='16' r='9' fill='none' stroke='%23f7931a' stroke-width='1.6' stroke-dasharray='3 3'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23f7931a'/%3E%3C/svg%3E">
+  <link rel="preload" href="/static/vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/home.css">
+</head>
+<body class="home">
+  <div class="sky" aria-hidden="true"></div>
+
+  <nav class="topnav">
+    <a class="brand" href="/">
+      <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
+        <circle cx="16" cy="16" r="14.5" fill="none" stroke="currentColor" stroke-width="1" opacity=".35"/>
+        <circle cx="16" cy="16" r="9" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 3"/>
+        <circle cx="16" cy="16" r="3.2" fill="currentColor"/>
+        <circle cx="27.5" cy="9" r="1.6" fill="currentColor"/>
+      </svg>
+      <span>本体工作台</span>
+    </a>
+    <div class="tabs" role="tablist">
+      <a href="/" class="tab" data-view="projects" role="tab">本体项目</a>
+      <a href="/sources" class="tab" data-view="sources" role="tab">数据源</a>
+      <a href="/mcp" class="tab" data-view="mcp" role="tab">MCP 接入</a>
+    </div>
+    <span class="nav-status" id="nav-status"></span>
+  </nav>
+
+  <main>
+    <!-- ---------------------------------------------------------------- projects -->
+    <section id="view-projects" class="view" hidden>
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">ONTOLOGY PROJECTS</p>
+          <h1>本体项目</h1>
+          <p class="lede">每个项目是一套独立的本体：类型、节点、关系、数据绑定和审核记录互不影响。</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn primary lg" id="create-btn">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            创建本体项目
+          </button>
+          <button type="button" class="btn lg" id="import-btn">导入 JSON</button>
+          <a class="btn lg" id="template-btn" href="/api/projects/template" download>下载导入模板</a>
+          <input type="file" id="import-file" accept="application/json,.json" hidden>
+        </div>
+      </header>
+
+      <div class="totals" id="totals" aria-label="全部项目合计"></div>
+
+      <div id="project-groups">
+        <div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div>
+      </div>
+    </section>
+
+    <!-- ----------------------------------------------------------------- sources -->
+    <section id="view-sources" class="view" hidden>
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">DATA SOURCES</p>
+          <h1>数据源</h1>
+          <p class="lede">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里，页面上只显示末四位；接入新来源只需新增一个连接器，会自动出现在这里。</p>
+        </div>
+      </header>
+      <div id="source-groups"><div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div></div>
+    </section>
+
+    <!-- --------------------------------------------------------------------- mcp -->
+    <section id="view-mcp" class="view" hidden>
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">MODEL CONTEXT PROTOCOL</p>
+          <h1>MCP 接入</h1>
+          <p class="lede">本体的全部能力都以 MCP 工具提供。工作台右侧的 agent 用的就是这一套；Claude Code、Claude Desktop 等客户端按下面的配置接入后，能做的事完全一样。接受和拒绝改动是人的决定，不是工具。</p>
+        </div>
+      </header>
+
+      <div class="mcp-grid">
+        <div class="mcp-side">
+          <section class="panel-card">
+            <h2>接入配置</h2>
+            <label class="field">
+              <span>项目</span>
+              <select id="mcp-project"></select>
+            </label>
+            <p class="hint field-hint" id="mcp-project-hint"></p>
+            <div class="seg" role="tablist" aria-label="配置格式">
+              <button type="button" role="tab" data-fmt="cli" aria-selected="true">Claude Code 命令</button>
+              <button type="button" role="tab" data-fmt="json" aria-selected="false">JSON 配置</button>
+            </div>
+            <div class="code">
+              <button type="button" class="btn sm copy" id="copy-config">复制</button>
+              <pre id="mcp-config"></pre>
+            </div>
+            <p class="hint" id="mcp-format-hint"></p>
+          </section>
+
+          <section class="panel-card">
+            <h2>需要 magpie 吗？</h2>
+            <p class="hint lead-hint">MCP 客户端（Claude Code、Claude Desktop、Cursor…）用它自己的模型思考，本体服务只提供工具，本身不调用模型。所以<strong>大部分情况不需要 magpie</strong>，只有下面标出的工具例外。</p>
+            <ul class="needs" id="mcp-needs"></ul>
+          </section>
+        </div>
+
+        <section class="panel-card tools-card">
+          <h2>工具 <span id="tool-count" class="count"></span></h2>
+          <div id="tool-groups"></div>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="project-dialog">
+    <form method="dialog" id="project-form">
+      <h2 id="dialog-title">创建本体项目</h2>
+      <label class="field"><span>名称</span><input id="f-name" required maxlength="60" placeholder="例如 ETF 资金流研究" autocomplete="off"></label>
+      <label class="field"><span>描述</span><textarea id="f-desc" rows="3" maxlength="300" placeholder="这个本体关注什么、用来做什么（可选）"></textarea></label>
+      <p class="hint" id="dialog-hint">新项目自带种子类型（资产、叙事、事件、宏观指标……），节点和关系由 agent 帮你搭。</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" value="cancel" id="dialog-cancel">取消</button>
+        <button type="submit" class="btn primary" id="dialog-ok">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toasts" class="home-toasts" aria-live="polite"></div>
+  <div class="grain" aria-hidden="true"></div>
+  <script type="module" src="/static/home.js"></script>
+</body>
+</html>

@@ -1,0 +1,165 @@
+# 本体类型注册表（种子）。
+# 这里是"人设计的 schema"：agent 只能通过 propose_type 提议新类型，由人确认后生效。
+# layer: world = 市场的数字孪生；company = 组织自身的数字孪生。
+# 属性类型: string | text | number | integer | boolean | datetime | enum | string_list
+# 关系的 from / to 列出允许的对象类型，"*" 表示任意类型。
+
+object_types:
+  Asset:
+    layer: world
+    description: 可交易或可跟踪的资产，如 BTC 现货、永续合约、现货 ETF、指数
+    properties:
+      symbol: {type: string, required: true}
+      asset_class: {type: enum, values: [spot, perpetual, future, etf, index, stablecoin, equity, commodity, fx]}
+
+  Concept:
+    layer: world
+    description: 技术或经济概念，如 减半、工作量证明、稀缺性、自托管
+    properties:
+      category: {type: enum, values: [protocol, economics, market_structure, regulation, other]}
+
+  Narrative:
+    layer: world
+    description: 市场叙事，如 数字黄金、ETF 机构化、美债避险；是整张图的枢纽
+    properties:
+      stance: {type: enum, values: [bullish, bearish, neutral]}
+      lifecycle: {type: enum, values: [emerging, spreading, consensus, fading]}
+      heat: {type: number}
+
+  Event:
+    layer: world
+    description: 已发生或预期中的事件，如 减半、ETF 获批、交易所被盗、FOMC 议息
+    properties:
+      category: {type: enum, values: [regulation, macro_release, hack, etf, halving, whale, policy, corporate, other]}
+      occurred_at: {type: datetime}
+      status: {type: enum, values: [expected, happened, digested]}
+      severity: {type: integer}
+
+  Entity:
+    layer: world
+    description: 市场参与者，如 交易所、ETF 发行方、矿工、巨鲸、机构、KOL、政府、央行
+    properties:
+      kind: {type: enum, values: [exchange, etf_issuer, miner, whale, institution, kol, government, central_bank, protocol, other], required: true}
+      country: {type: string}
+
+  MacroIndicator:
+    layer: world
+    description: 宏观指标定义，如 CPI、DXY、US10Y、M2、联邦基金利率
+    properties:
+      unit: {type: string}
+      release_frequency: {type: enum, values: [daily, weekly, monthly, quarterly, irregular]}
+
+  Metric:
+    layer: world
+    description: 链上或市场指标定义（不是数据点），如 MVRV、SOPR、资金费率、交易所净流入
+    properties:
+      domain: {type: enum, values: [onchain, derivatives, fund_flow, sentiment, price]}
+      unit: {type: string}
+
+  Department:
+    layer: company
+    description: 公司部门：数据 / 决策 / 执行 / 管理
+    properties:
+      mandate: {type: text}
+
+  Agent:
+    layer: company
+    description: 公司里的智能体
+    properties:
+      role: {type: string}
+      model: {type: string}
+
+  Signal:
+    layer: company
+    description: 决策部门产出的交易信号
+    properties:
+      direction: {type: enum, values: [long, short, flat], required: true}
+      strength: {type: number}
+      horizon: {type: enum, values: [4h, 1d, 1w, 1m]}
+      confidence: {type: number}
+
+link_types:
+  affects:
+    description: 事件影响叙事或资产
+    from: [Event]
+    to: [Narrative, Asset]
+    properties:
+      direction: {type: enum, values: [bullish, bearish, mixed]}
+      strength: {type: number}
+
+  drives:
+    description: 宏观指标、概念或指标驱动叙事或资产价格
+    from: [MacroIndicator, Concept, Metric]
+    to: [Narrative, Asset]
+    properties:
+      direction: {type: enum, values: [positive, negative, mixed]}
+
+  underpins:
+    description: 概念是叙事或资产价值的基础
+    from: [Concept]
+    to: [Narrative, Asset]
+
+  part_of:
+    description: 概念从属于更大的概念
+    from: [Concept]
+    to: [Concept]
+
+  competes_with:
+    description: 两个叙事相互竞争或此消彼长
+    from: [Narrative]
+    to: [Narrative]
+
+  measures:
+    description: 指标衡量某个资产、叙事或主体的状态
+    from: [Metric]
+    to: [Asset, Narrative, Entity]
+
+  tracks:
+    description: 一个资产跟踪另一个资产，如 IBIT 跟踪 BTC
+    from: [Asset]
+    to: [Asset]
+
+  issues:
+    description: 主体发行资产，如 BlackRock 发行 IBIT
+    from: [Entity]
+    to: [Asset]
+
+  holds:
+    description: 主体持有资产
+    from: [Entity]
+    to: [Asset]
+
+  sets:
+    description: 主体决定或发布宏观指标，如 美联储决定联邦基金利率
+    from: [Entity]
+    to: [MacroIndicator]
+
+  involves:
+    description: 事件涉及的主体或资产
+    from: [Event]
+    to: [Entity, Asset]
+
+  belongs_to:
+    description: 智能体属于部门
+    from: [Agent]
+    to: [Department]
+
+  watches:
+    description: 智能体负责跟踪的世界层对象
+    from: [Agent]
+    to: [Asset, Concept, Narrative, Event, Entity, MacroIndicator, Metric]
+
+  signal_on:
+    description: 信号针对的资产
+    from: [Signal]
+    to: [Asset]
+
+  based_on:
+    description: 信号依据的证据对象
+    from: [Signal]
+    to: [Asset, Concept, Narrative, Event, Entity, MacroIndicator, Metric]
+
+  authored:
+    description: 智能体产出了信号
+    from: [Agent]
+    to: [Signal]
