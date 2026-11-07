@@ -18,15 +18,29 @@ python3 -m venv .venv
 
 ## CloudBase 云托管预发布
 
-容器监听 8080，健康检查为 `GET /healthz`。用部署环境变量配置：
+容器监听 8080，健康检查为 `GET /healthz`。工作台使用 CloudBase Auth 的账号密码登录，仅接受受邀用户的 ID。
 
 | 变量 | 用途 |
 | --- | --- |
 | `DATABASE_URL` | CloudBase PostgreSQL 实例直连地址，使用控制台要求的 SSL 配置 |
-| `WORKBENCH_STAGE_PASSWORD` | 私有预发布入口的随机密码，至少 32 个字符，用户名为 `research` |
+| `WORKBENCH_CLOUDBASE_ENV_ID` | 提供身份认证的 CloudBase 环境 ID |
+| `WORKBENCH_PUBLIC_ORIGIN` | 浏览器访问工作台的 HTTPS 来源，不带路径或末尾斜杠 |
+| `WORKBENCH_ALLOWED_USER_IDS` | 受邀账号的 CloudBase 用户 ID，以逗号分隔 |
 | `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`WORKBENCH_MODEL` | 可选模型服务配置 |
 
 目前使用单个工作台实例。项目连接依赖 PostgreSQL 会话级 `search_path`。启动时初始化 `onto_research` 注册表，首次创建项目时会在 `onto_research_p_*` 下应用项目迁移，因此数据库登录角色需要访问注册表并创建项目 schema。
+
+先在 CloudBase 身份认证里启用账号密码登录并准备首个账号，再把该账号的用户 ID 加入允许名单。凭据由用户在登录页输入。工作台会话最长两小时，可通过退出登录立即撤销。
+
+新项目由登录账号自动拥有。已有项目升级时保留为未归属，云端账号看不到。备份并停止旧版共享口令入口后，数据库运营者可按已核实的项目 ID 逐个绑定：
+
+```sh
+.venv/bin/python -m ontology.cli project-claim <project-id> <cloudbase-user-id>
+```
+
+本地单用户 Web 入口只读取未归属项目。日常开发请配置独立的本地开发库。CLI 和本地 stdio MCP 使用数据库运营凭据，仅供受信任的运营者操作。
+
+私有数据启用后，回滚使用支持账号隔离的版本。旧版共享口令服务接入同一数据库时可读取项目，因此切流后应关闭旧版访问入口，并保持项目 schema 仅供后端访问。
 
 本地配置、密钥、测试数据和虚拟环境都应排除在上传目录外。上传到云托管的源代码目录仅需 `Dockerfile`、`.dockerignore`、`pyproject.toml`、`ontology/` 和 `workbench/`。容器进程以非 root 用户运行。
 

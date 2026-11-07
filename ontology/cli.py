@@ -46,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
     im = sub.add_parser("project-import")
     im.add_argument("file")
     im.add_argument("--name")
+    claim = sub.add_parser("project-claim", help="assign one reviewed legacy project to a CloudBase user ID")
+    claim.add_argument("project_id")
+    claim.add_argument("user_id")
     sub.add_parser("init", help="apply migrations and load the seed types")
     ls = sub.add_parser("changesets")
     ls.add_argument("--status")
@@ -92,6 +95,10 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.file, encoding="utf-8") as f:
                 p = projects.import_doc(reg, json.load(f), args.name)
             print(f"imported as project {p['id']} ({p['name']}): {p['stats']['nodes']} nodes, {p['stats']['links']} links")
+            return 0
+        if args.cmd == "project-claim":
+            projects.claim_legacy(reg, args.project_id, args.user_id)
+            print(f"已绑定项目 {args.project_id}。")
             return 0
         if args.project is None:
             p.error("--project is required for this command")

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,19 @@ SAMPLE_NODES = 60  # nodes per project sent to the home page for its mini conste
 
 REGISTRY = Path(__file__).parent / "schema" / "bootstrap.sql"
 
+# None is reserved for trusted CLI and background work. The local web app is
+# scoped to legacy/development projects with no account owner.
+workspace_owner: ContextVar[str | None] = ContextVar("workspace_owner", default=None)
+OWNER_FILTER = "(%s::text IS NULL OR owner_user_id IS NOT DISTINCT FROM NULLIF(%s::text, ''))"
+
+
+def _owner_params() -> tuple[str | None, str | None]:
+    owner = workspace_owner.get()
+    return owner, owner
+
 
 def ensure_registry(conn: psycopg.Connection) -> None:
-    if conn.execute("SELECT to_regclass('onto_research.projects') AS registry").fetchone()["registry"]:
+    if conn.execute("SELECT to_regclass('onto_research.web_sessions') AS registry").fetchone()["registry"]:
         return
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('onto_research.bootstrap'))")
@@ -45,7 +56,8 @@ def ensure_registry(conn: psycopg.Connection) -> None:
 def active_ids(conn: psycopg.Connection) -> list[str]:
     ensure_registry(conn)
     return [r["id"] for r in conn.execute(
-        "SELECT id FROM onto_research.projects WHERE status = 'active' ORDER BY updated_at DESC, id"
+        f"SELECT id FROM onto_research.projects WHERE status = 'active' AND {OWNER_FILTER} ORDER BY updated_at DESC, id",
+        _owner_params(),
     )]
 
 
@@ -55,7 +67,8 @@ def _iso(v: Any) -> Any:
 
 def get(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
     ensure_registry(conn)
-    row = conn.execute("SELECT * FROM onto_research.projects WHERE id = %s", (project_id,)).fetchone()
+    row = conn.execute(f"SELECT * FROM onto_research.projects WHERE id = %s AND {OWNER_FILTER}",
+                       (project_id, *_owner_params())).fetchone()
     if not row:
         raise OntologyError(f"no project '{project_id}'")
     return row
@@ -95,8 +108,10 @@ def create(conn: psycopg.Connection, name: str, description: str | None = None, 
     schema = PROJECT_SCHEMA_PREFIX + pid
     with conn.transaction():
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
-        conn.execute("INSERT INTO onto_research.projects (id, name, description, schema_name) VALUES (%s, %s, %s, %s)",
-                     (pid, name.strip(), (description or "").strip() or None, schema))
+        conn.execute(
+            "INSERT INTO onto_research.projects (id, name, description, schema_name, owner_user_id) VALUES (%s, %s, %s, %s, %s)",
+            (pid, name.strip(), (description or "").strip() or None, schema, workspace_owner.get() or None),
+        )
         conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema)))
         migrate(conn)
         OntologyStore(conn, actor="human").sync_seed_types()
@@ -115,16 +130,31 @@ def update(conn: psycopg.Connection, project_id: str, name: str | None = None, d
     if name is not None and not name.strip():
         raise OntologyError("project name is empty")
     conn.execute(
-        "UPDATE onto_research.projects SET name = %s, description = %s, status = %s, updated_at = now() WHERE id = %s",
+        f"""UPDATE onto_research.projects SET name = %s, description = %s, status = %s, updated_at = now()
+            WHERE id = %s AND {OWNER_FILTER}""",
         (name.strip() if name else p["name"], description.strip() or None if description is not None else p["description"],
-         status or p["status"], project_id),
+         status or p["status"], project_id, *_owner_params()),
     )
     return summary(conn, get(conn, project_id))
 
 
+def claim_legacy(conn: psycopg.Connection, project_id: str, user_id: str) -> None:
+    """Bind one reviewed legacy project. Existing ownership cannot be reassigned."""
+    if workspace_owner.get() is not None or not user_id.strip():
+        raise OntologyError("project claims require a database operator and a user ID")
+    ensure_registry(conn)
+    row = conn.execute(
+        """UPDATE onto_research.projects SET owner_user_id = %s
+           WHERE id = %s AND owner_user_id IS NULL RETURNING id""",
+        (user_id, project_id),
+    ).fetchone()
+    if row is None and get(conn, project_id)["owner_user_id"] != user_id:
+        raise OntologyError("project already belongs to another user")
+
+
 def summary(conn: psycopg.Connection, p: dict[str, Any]) -> dict[str, Any]:
     """Registry row plus what the home page shows: counts, pending review, data health and a graph sample."""
-    out = {k: _iso(v) for k, v in p.items()}
+    out = {k: _iso(v) for k, v in p.items() if k != "owner_user_id"}
     with project_connect(p["id"], _url(conn)) as pc:
         q = lambda s, *a: pc.execute(s, a).fetchone()  # noqa: E731
         out["stats"] = {
@@ -158,8 +188,9 @@ def summary(conn: psycopg.Connection, p: dict[str, Any]) -> dict[str, Any]:
 def list_all(conn: psycopg.Connection, include_archived: bool = True) -> list[dict[str, Any]]:
     ensure_registry(conn)
     rows = conn.execute(
-        "SELECT * FROM onto_research.projects WHERE %s OR status = 'active' ORDER BY updated_at DESC, id",
-        (include_archived,),
+        f"""SELECT * FROM onto_research.projects WHERE (%s OR status = 'active') AND {OWNER_FILTER}
+            ORDER BY updated_at DESC, id""",
+        (include_archived, *_owner_params()),
     ).fetchall()
     return [summary(conn, r) for r in rows]
 

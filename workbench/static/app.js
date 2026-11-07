@@ -1608,9 +1608,16 @@ function connect() {
     else if (msg.type === "error") log("error", msg.text);
     else if (msg.type === "status") { if (msg.text) log("note", msg.text); setBusy(msg.busy); }
   };
-  ws.onclose = () => { setConn("off"); setBusy(false); setTimeout(connect, 1500); };
+  ws.onclose = async () => {
+    setConn("off");
+    setBusy(false);
+    const session = await fetch("/auth/session").catch(() => null);
+    if (session?.status === 401) location.replace("/login");
+    else setTimeout(connect, 1500);
+  };
 }
 connect();
+addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
 
 function send(text = input.value.trim()) {
   if (!text || busy || ws.readyState !== WebSocket.OPEN) return;
