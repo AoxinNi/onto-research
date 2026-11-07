@@ -43,3 +43,12 @@ CREATE TABLE IF NOT EXISTS onto_research.web_auth_challenges (
     expires_at timestamptz NOT NULL
 );
 ALTER TABLE onto_research.web_auth_challenges ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS onto_research.web_model_settings (
+    user_id text PRIMARY KEY,
+    base_url text NOT NULL,
+    model text NOT NULL,
+    auth_kind text NOT NULL CHECK (auth_kind IN ('api_key', 'bearer')),
+    encrypted_key bytea NOT NULL
+);
+ALTER TABLE onto_research.web_model_settings ENABLE ROW LEVEL SECURITY;

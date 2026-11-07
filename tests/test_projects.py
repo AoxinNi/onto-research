@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -220,18 +221,23 @@ def test_model_choice_is_per_conversation_and_used(client, monkeypatch):
 
 
 def test_models_endpoint_reads_the_model_list(client, monkeypatch):
-    class R:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"data": [{"id": "codex/gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "owned_by": "codex", "context_window": 500000},
-                             {"id": "claude/claude-opus-5-5", "display_name": "Claude Opus 5.5", "owned_by": "claude"}]}
+    original_client = httpx.Client
 
-    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: R())
-    server._models_cache.clear()
+    def provider(request):
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [
+            {"id": "codex/gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "owned_by": "codex", "context_window": 500000},
+            {"id": "claude/claude-opus-5-5", "display_name": "Claude Opus 5.5", "owned_by": "claude"},
+        ]})
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-catalog-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://models.example")
+    monkeypatch.setattr(server.model_settings, "_stored", lambda user_id: {})
+    monkeypatch.setattr(httpx, "Client",
+                        lambda **kwargs: original_client(transport=httpx.MockTransport(provider), **kwargs))
     data = client.get("/api/models").json()
     ids = [m["id"] for m in data["models"]]
     assert "codex/gpt-6.1-sol" in ids and "claude/claude-opus-5-5" in ids and data["default"] in ids
-    server._models_cache.clear()
 
 
 def test_files_exported_before_the_rename_still_import(conn):

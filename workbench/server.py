@@ -35,9 +35,10 @@ from ontology.errors import OntologyError
 from ontology.store import OntologyStore
 
 from . import agent as agent_mod
-from . import sessions
+from . import model_settings, sessions
 from .agent import WorkbenchAgent
 from .auth import WorkspaceScope
+from .cloud import _json_body
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("workbench")
@@ -174,8 +175,14 @@ def collect_lock(project: str) -> asyncio.Lock:
     """One collection at a time per project: the background loop and the refresh button take turns."""
     return _collect_locks.setdefault(project, asyncio.Lock())
 agent_lock = asyncio.Lock()
-make_agent = WorkbenchAgent  # replaced in tests
 Project = Query(projects.DEFAULT, pattern=r"^[a-z][a-z0-9_-]{1,40}$")
+
+
+def make_agent() -> WorkbenchAgent:
+    route = model_settings.resolve(projects.workspace_owner.get() or "")
+    if not route.key:
+        raise model_settings.SettingsError("请先在平台设置中配置 Agent 模型连接。")
+    return WorkbenchAgent(route.client(), model=route.model, standard=route.mode != "environment", close_client=True)
 
 
 @contextmanager
@@ -245,6 +252,11 @@ def sources_page() -> FileResponse:
     return FileResponse(STATIC / "home.html")
 
 
+@app.get("/settings")
+def settings_page() -> FileResponse:
+    return FileResponse(STATIC / "home.html")
+
+
 @app.get("/p/{project}")
 def workbench_page(project: str) -> FileResponse:
     _registry(lambda c: projects.get(c, project))
@@ -299,39 +311,80 @@ def _download(doc: dict[str, Any], filename: str) -> JSONResponse:
     return JSONResponse(doc, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
 
 
-_models_cache: dict[str, Any] = {}
-
-
 def _list_models() -> dict[str, Any]:
-    """The models the model endpoint offers. Through magpie that is every Claude and Codex model it routes."""
-    base = os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
-    out: dict[str, Any] = {"default": agent_mod.MODEL, "base_url": base, "via": "magpie" if ":3425" in base else None,
-                           "models": [], "error": None}
+    user_id = projects.workspace_owner.get() or ""
     try:
-        key = os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or ""
-        r = httpx.get(f"{base}/v1/models", headers={"x-api-key": key, "anthropic-version": "2023-06-01"},
-                      params={"limit": 200}, timeout=8)
-        r.raise_for_status()
-        for m in r.json().get("data", []):
-            mid = m["id"]
-            out["models"].append({
-                "id": mid, "name": m.get("display_name") or mid,
-                "provider": m.get("owned_by") or (mid.split("/")[0] if "/" in mid else "anthropic"),
-                "context": m.get("context_window") or m.get("max_input_tokens"),
-            })
-    except (httpx.HTTPError, ValueError, KeyError) as e:
-        out["error"] = f"读不到模型列表：{e}"
-    if not any(m["id"] == out["default"] for m in out["models"]):
-        out["models"].insert(0, {"id": out["default"], "name": out["default"], "provider": "默认", "context": None})
-    return out
+        route = model_settings.resolve(user_id)
+    except model_settings.SettingsError as error:
+        return {"default": agent_mod.MODEL, "base_url": None, "via": None, "models": [], "error": str(error)}
+    return model_settings.catalog(route, include_url=not user_id or route.mode == "custom")
 
 
 @app.get("/api/models")
 async def list_models() -> dict[str, Any]:
-    now = asyncio.get_running_loop().time()
-    if not _models_cache or now - _models_cache["at"] > 300:
-        _models_cache.update(at=now, data=await asyncio.to_thread(_list_models))
-    return _models_cache["data"]
+    return await asyncio.to_thread(_list_models)
+
+
+def _model_settings_user(request: Request) -> str:
+    user_id = projects.workspace_owner.get() or ""
+    if user_id:
+        return user_id
+    if (not request.client or request.client.host not in model_settings.LOCAL_HOSTS
+            or request.url.hostname not in model_settings.LOCAL_HOSTS):
+        raise HTTPException(status_code=403, detail="本地模型设置仅可从本机访问。")
+    if request.method != "GET" and request.headers.get("origin") != f"{request.url.scheme}://{request.url.netloc}":
+        raise HTTPException(status_code=403, detail="请求来源无效。")
+    return ""
+
+
+@app.get("/api/settings/model")
+def get_model_settings(request: Request) -> dict:
+    return model_settings.public_settings(_model_settings_user(request))
+
+
+@app.get("/api/settings/model/local/{mode}")
+def local_model_catalog(mode: str, request: Request) -> dict:
+    if _model_settings_user(request):
+        raise HTTPException(status_code=403, detail="本机路由仅在本地工作台可用。")
+    try:
+        default = "claude-sonnet-5" if mode == "ccswitch" else model_settings.environment_route().model
+        route = model_settings.local_provider(mode, default)
+    except model_settings.SettingsError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from None
+    return model_settings.catalog(route, include_url=True)
+
+
+@app.put("/api/settings/model")
+async def put_model_settings(request: Request) -> dict:
+    user_id = _model_settings_user(request)
+    data = await _json_body(request)
+    try:
+        return await asyncio.to_thread(model_settings.save, user_id, data)
+    except model_settings.SettingsError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except OSError:
+        raise HTTPException(status_code=503, detail="无法保存本机模型设置。") from None
+
+
+@app.post("/api/settings/model/test")
+async def test_model_settings(request: Request) -> dict:
+    user_id = _model_settings_user(request)
+    try:
+        route = await asyncio.to_thread(model_settings.resolve, user_id)
+        if not route.key:
+            raise model_settings.SettingsError("请先保存模型连接。")
+        async with route.client() as client:
+            reply = await client.messages.create(model=route.model, messages=[{"role": "user", "content": "Reply OK."}],
+                                                 max_tokens=16, timeout=12)
+            if not getattr(reply, "content", None):
+                raise model_settings.SettingsError("模型没有返回可识别的消息。")
+    except model_settings.SettingsError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except anthropic.AuthenticationError:
+        raise HTTPException(status_code=502, detail="模型服务拒绝了凭据，请检查 API Key 和鉴权方式。") from None
+    except (anthropic.APIError, ValueError):
+        raise HTTPException(status_code=502, detail="模型测试失败，请检查 Base URL、模型 ID 和服务状态。") from None
+    return {"ok": True, "model": route.model}
 
 
 def _source_health() -> dict[str, dict[str, Any]]:
@@ -404,7 +457,10 @@ def _test_provider(provider_id: str) -> dict[str, Any]:
         "defillama": lambda: f"USDT 流通 {sources_mod.source('defillama_stablecoin').fetch({'id': '1'}, now - timedelta(days=3))[-1].value / 1e8:,.0f} 亿美元",
         "ths": lambda: "检索「贵州茅台」→ " + ", ".join(f"{i['name']} {i['thscode']}" for i in ths.search("贵州茅台", "a-share", 1)),
         "rss": lambda: f"拉到 {len(news.parse_feed(httpx.get(news.FEEDS[1][1], timeout=15, headers={'User-Agent': sources_mod.USER_AGENT}).text))} 篇（{news.FEEDS[1][0]}）",
-        "grok": lambda: "magpie 里的 Grok 模型：" + (", ".join(m["id"] for m in _list_models()["models"] if m["id"].startswith("grok/")) or "没有"),
+        "grok": lambda: "magpie 里的 Grok 模型：" + (", ".join(
+            m["id"] for m in model_settings.catalog(model_settings.environment_route(), include_url=False)["models"]
+            if m["id"].startswith("grok/")
+        ) or "没有"),
     }
     if provider_id not in checks:
         return {"ok": True, "message": "这个来源不需要连接外部服务"}
@@ -444,7 +500,8 @@ async def mcp_info() -> dict[str, Any]:
         raise HTTPException(status_code=403, detail="云端工作区仅支持页面内的 Agent。")
     tools = await mcp_server.server.list_tools()
     base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
-    models = await asyncio.to_thread(_list_models) if base else {"models": [], "error": None}
+    models = (await asyncio.to_thread(model_settings.catalog, model_settings.environment_route(), include_url=False)
+              if base else {"models": [], "error": None})
     return {
         "python": sys.executable,
         "cwd": str(Path(__file__).resolve().parent.parent),
@@ -683,25 +740,32 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
             async with agent_lock:
                 await ws.send_json({"type": "status", "busy": True})
                 token = mcp_server.current_project.set(project)  # the agent's tools act on this page's project
-                agent = make_agent()
-                agent.messages = sessions.load_messages(pconn, session_id)  # pick the conversation up where it was
-                agent.model = (sessions.get(pconn, session_id) or {}).get("model") or agent.model
+                agent = None
                 try:
+                    agent = await asyncio.to_thread(make_agent)
+                    agent.messages = sessions.load_messages(pconn, session_id)
+                    agent.model = (sessions.get(pconn, session_id) or {}).get("model") or agent.model
                     await agent.run(text, emit)
+                except model_settings.SettingsError as error:
+                    await emit({"type": "error", "text": str(error)})
                 except anthropic.AuthenticationError:
-                    await emit({"type": "error", "text": "没有可用的模型凭证：请在 .env 里设置 ANTHROPIC_API_KEY 后重启工作台。"})
+                    await emit({"type": "error", "text": "模型服务拒绝了凭据，请检查平台设置中的 API Key。"})
                 except anthropic.APIConnectionError:
-                    await emit({"type": "error", "text": "连不上模型服务，请检查网络或 magpie 是否在运行。"})
+                    await emit({"type": "error", "text": "连不上模型服务，请检查平台设置中的 URL 和路由状态。"})
                 except anthropic.APIStatusError as e:
-                    await emit({"type": "error", "text": f"模型服务出错（{e.status_code}）：{e.message}"})
+                    await emit({"type": "error", "text": f"模型服务返回 HTTP {e.status_code}，请检查模型配置。"})
                 except agent_mod.BrokenReply:
                     await emit({"type": "error", "text": "模型服务的回复中途断了（重试了 3 次）。已完成的步骤都保留着，发一句「继续」就能接着做。"})
                 except Exception as e:  # keep the socket alive; show the user what broke
-                    log.exception("agent run failed")
-                    await emit({"type": "error", "text": f"出错了：{e}"})
+                    log.error("agent run failed (%s)", type(e).__name__)
+                    await emit({"type": "error", "text": "Agent 执行失败，请重试。"})
                 finally:
                     mcp_server.current_project.reset(token)
-                    sessions.save_messages(pconn, session_id, agent.export_messages())
+                    if agent is not None:
+                        try:
+                            sessions.save_messages(pconn, session_id, agent.export_messages())
+                        finally:
+                            await agent.close()
                     await ws.send_json({"type": "status", "busy": False})
                     await broadcast(project, snapshot(project))
     except WebSocketDisconnect:

@@ -77,12 +77,19 @@ async def call_mcp_tool(name: str, args: dict[str, Any]) -> tuple[str, bool]:
 class WorkbenchAgent:
     """One conversation. History is append-only so thinking blocks and the prompt cache stay valid."""
 
-    def __init__(self, client: anthropic.AsyncAnthropic | None = None, model: str = MODEL, effort: str = EFFORT):
+    def __init__(self, client: anthropic.AsyncAnthropic | None = None, model: str = MODEL, effort: str = EFFORT,
+                 *, standard: bool = False, close_client: bool = False):
         self.client = client or anthropic.AsyncAnthropic()
         self.model = model
         self.effort = effort
+        self.standard = standard
+        self.close_client = close_client or client is None
         self.messages: list[dict[str, Any]] = []
         self._tools: list[dict[str, Any]] | None = None
+
+    async def close(self) -> None:
+        if self.close_client:
+            await self.client.close()
 
     def export_messages(self) -> list[dict[str, Any]]:
         """The history as plain JSON (SDK content blocks become dicts), to store and later hand back to the API."""
@@ -103,13 +110,27 @@ class WorkbenchAgent:
     async def _create(self, **kw: Any) -> Any:
         """One model call. A gateway such as magpie can drop the upstream mid-reply and hand back a body that is
         not JSON; the SDK does not retry that, so retry here a couple of times before giving up."""
+        if self.standard:
+            messages = []
+            for message in self.export_messages():
+                if isinstance(message["content"], list):
+                    message["content"] = [block for block in message["content"]
+                                          if block.get("type") not in ("thinking", "redacted_thinking")]
+                if message["content"]:
+                    messages.append(message)
+            kw["messages"] = messages
+            create = self.client.messages.create
+        else:
+            kw.update(output_config={"effort": self.effort}, cache_control={"type": "ephemeral"},
+                      betas=["server-side-fallback-2026-07-01"], fallbacks="default")
+            create = self.client.beta.messages.create
         for wait in (*BROKEN_RETRIES, None):
             try:
-                return await self.client.beta.messages.create(**kw)
+                return await create(**kw)
             except (json.JSONDecodeError, anthropic.APIResponseValidationError) as e:
                 if wait is None:
                     raise BrokenReply(str(e)) from e
-                log.warning("unreadable model reply (%s); retrying in %ss", e, wait)
+                log.warning("unreadable model reply (%s); retrying in %ss", type(e).__name__, wait)
                 await asyncio.sleep(wait)
 
     async def run(self, text: str, emit: Emit) -> None:
@@ -123,10 +144,6 @@ class WorkbenchAgent:
                 system=SYSTEM,
                 tools=tools,
                 messages=self.messages,
-                output_config={"effort": self.effort},
-                cache_control={"type": "ephemeral"},
-                betas=["server-side-fallback-2026-07-01"],
-                fallbacks="default",
             )
             if response.stop_reason == "refusal":
                 # Nothing usable came back: drop this request so the conversation can continue.

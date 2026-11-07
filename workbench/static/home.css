@@ -60,6 +60,9 @@ main { max-width: 1280px; margin: 0 auto; padding: 48px 32px 96px; }
 .login-form .login-form { margin-top: 0; }
 .login-page [hidden] { display: none; }
 .topnav [hidden] { display: none; }
+.model-settings { display: grid; gap: 16px; max-width: 640px; margin-top: 24px; }
+.model-settings [hidden] { display: none; }
+.model-settings .hint { margin: 0; overflow-wrap: anywhere; }
 .btn.lg { height: 40px; padding: 0 18px; font-size: 13.5px; border-radius: 12px; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
 .btn.lg svg { width: 14px; height: 14px; }
 .btn.sm { height: 26px; padding: 0 10px; font-size: 12px; }
@@ -269,8 +272,10 @@ dialog h2 { margin: 0 0 20px; font-size: 18px; font-weight: 600; letter-spacing:
   .tool .params { grid-column: 1; }
 }
 @media (max-width: 640px) {
-  .topnav { padding: 0 16px; gap: 16px; }
+  .topnav { padding: 0 12px; gap: 8px; }
   .brand span, .nav-status { display: none; }
+  .tabs { min-width: 0; overflow-x: auto; }
+  .tab { padding: 0 9px; white-space: nowrap; }
   main { padding: 28px 16px 72px; }
   .page-actions { width: 100%; }
   .page-actions .btn.lg { flex: 1 1 auto; justify-content: center; }

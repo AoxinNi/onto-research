@@ -1452,7 +1452,7 @@ function renderModel() {
   $("#model-name").textContent = active ? shortName(active) : "模型";
   const provider = active?.split("/")[0];
   $("#model-btn").dataset.provider = provider || "";
-  $("#model-btn").dataset.tip = active ? `${active}${models?.via ? " · 经 magpie" : ""}` : "选择模型";
+  $("#model-btn").dataset.tip = active ? `${active}${models?.via ? ` · 经 ${models.via}` : ""}` : "选择模型";
   const menu = $("#model-menu");
   if (!models) { menu.replaceChildren(el("p", { class: "sess-empty" }, "读不到模型列表")); return; }
   const groups = new Map();
@@ -1468,7 +1468,7 @@ function renderModel() {
         onclick: () => chooseModel(m.id),
       }, el("span", { class: "model-label" }, m.name), m.id === models.default && el("span", { class: "model-tag" }, "默认"),
         m.context && el("span", { class: "model-ctx" }, `${Math.round(m.context / 1000)}K`))))),
-    el("p", { class: "model-foot" }, models.via ? `经 magpie 路由 · ${models.base_url}` : models.base_url, models.error ? ` · ${models.error}` : ""),
+    el("p", { class: "model-foot" }, [models.via, models.base_url, models.error].filter(Boolean).join(" · ")),
   );
 }
 
