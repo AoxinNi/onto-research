@@ -29,6 +29,7 @@
       <a href="/mcp" class="tab" data-view="mcp" role="tab">MCP 接入</a>
     </div>
     <span class="nav-status" id="nav-status"></span>
+    <button type="button" class="btn sm" id="sign-out" hidden>退出登录</button>
   </nav>
 
   <main>
@@ -64,7 +65,7 @@
         <div>
           <p class="eyebrow">DATA SOURCES</p>
           <h1>数据源</h1>
-          <p class="lede">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里，页面上只显示末四位；接入新来源只需新增一个连接器，会自动出现在这里。</p>
+          <p class="lede" id="sources-description">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里。</p>
         </div>
       </header>
       <div id="source-groups"><div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div></div>

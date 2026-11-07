@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>登录 · 本体工作台</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/home.css">
+</head>
+<body class="home">
+  <div class="sky" aria-hidden="true"></div>
+  <main class="login-page">
+    <header class="page-head">
+      <div>
+        <p class="eyebrow">ONTO-RESEARCH</p>
+        <h1>登录工作台</h1>
+        <p class="lede">用受邀账号进入你的私有研究工作区。</p>
+      </div>
+    </header>
+    <form id="login-form" class="panel-card login-form" method="post" action="/auth/login">
+      <label class="field">
+        <span>账号</span>
+        <input name="username" autocomplete="username" maxlength="254" required>
+      </label>
+      <label class="field">
+        <span>密码</span>
+        <input name="password" type="password" autocomplete="current-password" maxlength="256" required>
+      </label>
+      <button type="submit" class="btn primary lg" disabled>登录</button>
+      <p id="login-error" class="test-result bad" role="alert" hidden></p>
+    </form>
+  </main>
+  <script type="module" src="/static/login.js"></script>
+</body>
+</html>

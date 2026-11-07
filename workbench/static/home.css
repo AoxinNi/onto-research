@@ -54,6 +54,10 @@ main { max-width: 1280px; margin: 0 auto; padding: 48px 32px 96px; }
 .page-head h1 { margin: 0; font-size: clamp(30px, 3.6vw, 44px); line-height: 1.1; font-weight: 600; letter-spacing: -.03em; }
 .page-head .lede { margin: 14px 0 0; max-width: 44em; color: var(--text-2); font-size: 14.5px; line-height: 1.65; }
 .page-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.login-page { max-width: 480px; padding-top: clamp(56px, 15vh, 150px); }
+.login-form { display: grid; gap: 16px; margin-top: 24px; }
+.login-form button { justify-self: start; }
+.topnav [hidden] { display: none; }
 .btn.lg { height: 40px; padding: 0 18px; font-size: 13.5px; border-radius: 12px; display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
 .btn.lg svg { width: 14px; height: 14px; }
 .btn.sm { height: 26px; padding: 0 10px; font-size: 12px; }

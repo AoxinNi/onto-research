@@ -37,6 +37,7 @@ from ontology.store import OntologyStore
 from . import agent as agent_mod
 from . import sessions
 from .agent import WorkbenchAgent
+from .auth import WorkspaceScope
 
 STATIC = Path(__file__).parent / "static"
 log = logging.getLogger("workbench")
@@ -151,6 +152,7 @@ async def report_forever() -> None:
 
 
 app = FastAPI(title="本体工作台", lifespan=lifespan)
+app.add_middleware(WorkspaceScope)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -378,7 +380,10 @@ async def list_sources_page() -> dict[str, Any]:
     out = []
     for p in providers_mod.PROVIDERS.values():
         srcs = [s.describe() | {"label_example": s.title} for s in sources_mod.SOURCES.values() if s.provider == p.id]
-        out.append(p.describe() | {"sources": srcs, "health": health.get(p.id, {"series": 0, "errors": 0, "stale": 0,
+        details = p.describe()
+        if projects.workspace_owner.get():
+            details.pop("key_hint", None)
+        out.append(details | {"sources": srcs, "health": health.get(p.id, {"series": 0, "errors": 0, "stale": 0,
                                                                                  "last_ok": None, "last_error": None, "projects": []})})
     return {"providers": out, "categories": providers_mod.CATEGORIES}
 
@@ -423,7 +428,7 @@ class KeyIn(BaseModel):
 @app.put("/api/sources/{provider_id}/key")
 async def set_source_key(provider_id: str, body: KeyIn, request: Request) -> dict[str, Any]:
     """Save a provider's API key into .env. Only from this machine: the key never leaves it."""
-    if not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+    if projects.workspace_owner.get() or not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
         raise HTTPException(status_code=403, detail="只能在运行工作台的这台电脑上设置密钥")
     try:
         p = providers_mod.save_key(provider_id, body.key)
@@ -435,6 +440,8 @@ async def set_source_key(provider_id: str, body: KeyIn, request: Request) -> dic
 @app.get("/api/mcp")
 async def mcp_info() -> dict[str, Any]:
     """What an MCP client gets: the tool list, and how to start the server for a project."""
+    if projects.workspace_owner.get():
+        raise HTTPException(status_code=403, detail="云端工作区仅支持页面内的 Agent。")
     tools = await mcp_server.server.list_tools()
     base = os.environ.get("ANTHROPIC_BASE_URL", "").rstrip("/")
     models = await asyncio.to_thread(_list_models) if base else {"models": [], "error": None}
@@ -526,6 +533,8 @@ async def decide_changeset(cs: str, action: str, project: str = Project) -> dict
 @app.post("/api/refresh")
 async def refresh_data(project: str = Project) -> dict[str, Any]:
     """Fetch the latest data for this project now, then push the updated graph to its open pages."""
+    _registry(lambda c: projects.get(c, project))
+
     def run() -> dict[str, Any]:
         with projects.project_connect(project) as conn:
             return collector.refresh_now(conn)
@@ -577,6 +586,7 @@ async def get_report(project: str = Project, id: str | None = None, at: str | No
 
 @app.post("/api/report/regenerate")
 async def regenerate_report(project: str = Project) -> dict[str, Any]:
+    _registry(lambda c: projects.get(c, project))
     try:
         return await write_report(project, "manual")
     except OntologyError as e:
@@ -626,18 +636,13 @@ def session_message(project: str, session_id: str | None) -> dict[str, Any]:
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: str | None = None) -> None:
-    await ws.accept()
     try:
         first = snapshot(project)
-    except HTTPException as e:
-        await ws.send_json({"type": "error", "text": e.detail})
-        await ws.close()
+    except HTTPException:
+        await ws.close(code=1008)
         return
-    clients.setdefault(project, set()).add(ws)
-    await ws.send_json(first)
     current = session_message(project, session)
     session_id = current["session"]["id"]
-    await ws.send_json(current)
     pconn = await asyncio.to_thread(projects.project_connect, project)  # this page's own connection, for its chat
 
     def record(event: dict[str, Any]) -> None:
@@ -650,6 +655,10 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
             await broadcast(project, snapshot(project))
 
     try:
+        await ws.accept()
+        clients.setdefault(project, set()).add(ws)
+        await ws.send_json(first)
+        await ws.send_json(current)
         while True:
             msg = await ws.receive_json()
             kind = msg.get("type")

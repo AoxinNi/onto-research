@@ -64,6 +64,8 @@ def store() -> OntologyStore:
         return _store
     pid = active_project()
     s = _stores.get(pid)
+    if s is not None and not s.conn.closed and projects.workspace_owner.get() is not None:
+        projects.get(s.conn, pid)
     if s is None or s.conn.closed:
         s = OntologyStore(projects.project_connect(pid), actor=os.environ.get("ONTOLOGY_ACTOR", "workbench-agent"))
         if not s.registry.object_types:

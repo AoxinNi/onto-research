@@ -16,6 +16,7 @@ const el = (tag, attrs = {}, ...children) => {
 };
 const svg = (markup) => { const t = document.createElement("template"); t.innerHTML = markup.trim(); return t.content.firstChild; };
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let cloudWorkspace = false;
 
 function ago(iso) {
   if (!iso) return "—";
@@ -34,6 +35,7 @@ function toast(text, bad = false) {
 
 async function api(url, opts = {}) {
   const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (res.status === 401) location.replace("/login");
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `请求失败（${res.status}）`);
   return body;
@@ -184,7 +186,7 @@ function toggleMenu(p, btn) {
   const menu = el("div", { class: "menu", role: "menu", onclick: (e) => e.stopPropagation() },
     el("button", { type: "button", role: "menuitem", onclick: act(() => openDialog(p)) }, "编辑名称和描述"),
     el("button", { type: "button", role: "menuitem", onclick: act(() => { location.href = `/api/projects/${encodeURIComponent(p.id)}/export`; }) }, "导出 JSON"),
-    el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
+    !cloudWorkspace && el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
     el("button", { type: "button", role: "menuitem", class: p.status === "active" ? "danger" : "",
       onclick: act(() => setStatus(p, p.status === "active" ? "archived" : "active")) }, p.status === "active" ? "归档" : "恢复"),
   );
@@ -471,7 +473,7 @@ function sourceCard(p, i) {
       el("span", {}, "最近成功 ", el("b", {}, h.last_ok ? ago(h.last_ok) : "—")),
       h.projects.length > 0 && el("span", {}, "项目 ", el("b", {}, h.projects.join("、")))),
     h.last_error && el("p", { class: "src-error" }, `${h.last_error.series}：${h.last_error.error}`),
-    p.auth_env && keyRow(p),
+    p.auth_env && !cloudWorkspace && keyRow(p),
     p.sources.length > 0 && el("ul", { class: "src-list" }, ...p.sources.map((s) => el("li", {},
       el("span", {}, s.title), el("code", {}, s.source)))),
     el("div", { class: "src-foot" },
@@ -483,7 +485,36 @@ function sourceCard(p, i) {
 
 // ------------------------------------------------------------------ start
 
-show(viewFromPath());
-loadProjects();
+$("#sign-out").addEventListener("click", async () => {
+  const button = $("#sign-out");
+  button.disabled = true;
+  try {
+    const response = await fetch("/auth/logout", { method: "POST" });
+    if (!response.ok) throw new Error();
+    location.replace("/login");
+  } catch {
+    button.disabled = false;
+    toast("退出失败，请重试。", true);
+  }
+});
+
+async function start() {
+  const session = await fetch("/auth/session").catch(() => null);
+  if (session?.status === 401) {
+    location.replace("/login");
+    return;
+  }
+  cloudWorkspace = session?.ok === true;
+  if (cloudWorkspace) {
+    $("#sign-out").hidden = false;
+    $('.tab[data-view="mcp"]').hidden = true;
+    $("#sources-description").textContent = "这里显示你正在进行的项目所使用的数据源。云端数据源凭据由工作台运营者管理。";
+  }
+  show(cloudWorkspace && viewFromPath() === "mcp" ? "projects" : viewFromPath());
+  loadProjects();
+}
+
+start();
+addEventListener("pageshow", (event) => { if (event.persisted && cloudWorkspace) location.reload(); });
 setInterval(() => { if (!document.hidden && !$("#view-projects").hidden && !openMenu && !dialog.open) loadProjects(); }, 30000);
 if (REDUCED) document.documentElement.classList.add("reduced");
