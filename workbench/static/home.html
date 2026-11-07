@@ -27,6 +27,7 @@
       <a href="/" class="tab" data-view="projects" role="tab">本体项目</a>
       <a href="/sources" class="tab" data-view="sources" role="tab">数据源</a>
       <a href="/mcp" class="tab" data-view="mcp" role="tab">MCP 接入</a>
+      <a href="/settings" class="tab" data-view="settings" role="tab">平台设置</a>
     </div>
     <span class="nav-status" id="nav-status"></span>
     <button type="button" class="btn sm" id="sign-out" hidden>退出登录</button>
@@ -69,6 +70,54 @@
         </div>
       </header>
       <div id="source-groups"><div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div></div>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">WORKBENCH SETTINGS</p>
+          <h1>平台设置</h1>
+          <p class="lede">配置工作台 Agent 使用的模型。保存后，下一次对话请求会使用新的连接。</p>
+        </div>
+      </header>
+      <form id="model-settings" class="panel-card model-settings">
+        <h2>Agent 模型连接</h2>
+        <label class="field">
+          <span>连接方式</span>
+          <select name="mode" disabled>
+            <option value="environment">沿用运行环境</option>
+            <option value="custom">自定义 Anthropic 兼容接口</option>
+            <option value="magpie" hidden>本机 Magpie</option>
+            <option value="ccswitch" hidden>本机 CC Switch</option>
+          </select>
+        </label>
+        <p id="model-route-hint" class="hint"></p>
+        <label id="model-url-field" class="field" hidden>
+          <span>Base URL</span>
+          <input name="base_url" type="url" autocomplete="off" spellcheck="false" maxlength="512" placeholder="https://api.anthropic.com">
+        </label>
+        <label id="model-auth-field" class="field" hidden>
+          <span>鉴权方式</span>
+          <select name="auth_kind">
+            <option value="api_key">API Key（x-api-key）</option>
+            <option value="bearer">Bearer Token</option>
+          </select>
+        </label>
+        <label id="model-name-field" class="field" hidden>
+          <span>默认模型 ID</span>
+          <input name="model" autocomplete="off" spellcheck="false" maxlength="120" list="local-model-options">
+          <datalist id="local-model-options"></datalist>
+        </label>
+        <label id="model-key-field" class="field" hidden>
+          <span>API Key</span>
+          <input name="api_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048">
+        </label>
+        <div class="page-actions">
+          <button type="submit" class="btn primary lg" disabled>保存设置</button>
+          <button type="button" class="btn lg" id="test-model-settings" disabled>测试已保存连接</button>
+        </div>
+        <p id="model-settings-result" class="test-result" aria-live="polite" hidden></p>
+      </form>
     </section>
 
     <!-- --------------------------------------------------------------------- mcp -->

@@ -64,7 +64,7 @@ class CloudAccess:
             if kind == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
                 return
-            if method == "GET" and (path in ("/", "/sources", "/mcp") or path.startswith("/p/")):
+            if method == "GET" and (path in ("/", "/sources", "/mcp", "/settings") or path.startswith("/p/")):
                 response = RedirectResponse("/login", status_code=303, headers=NO_STORE)
             else:
                 response = JSONResponse({"detail": "请先登录。"}, 401, headers=NO_STORE)

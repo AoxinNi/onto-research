@@ -46,15 +46,16 @@ async function api(url, opts = {}) {
 function show(view, push = false) {
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== `view-${view}`;
   for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.view === view));
-  document.title = `${{ mcp: "MCP 接入", sources: "数据源" }[view] || "本体项目"} · 本体工作台`;
+  document.title = `${{ mcp: "MCP 接入", sources: "数据源", settings: "平台设置" }[view] || "本体项目"} · 本体工作台`;
   if (push) history.pushState({ view }, "", view === "projects" ? "/" : `/${view}`);
   if (view === "mcp") loadMcp();
   if (view === "sources") loadSources();
+  if (view === "settings") loadModelSettings();
 }
 for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.view, true); });
 }
-const viewFromPath = () => ({ "/mcp": "mcp", "/sources": "sources" })[location.pathname] || "projects";
+const viewFromPath = () => ({ "/mcp": "mcp", "/sources": "sources", "/settings": "settings" })[location.pathname] || "projects";
 addEventListener("popstate", () => show(viewFromPath()));
 
 // ------------------------------------------------------------------ constellation
@@ -482,6 +483,103 @@ function sourceCard(p, i) {
     result,
   );
 }
+
+// ------------------------------------------------------------------ model settings
+
+const modelForm = $("#model-settings");
+const modelSave = modelForm.querySelector('button[type="submit"]');
+const modelTest = $("#test-model-settings");
+const modelResult = $("#model-settings-result");
+let savedModelSettings = null;
+
+function modelMessage(text, error = false) {
+  modelResult.hidden = false;
+  modelResult.textContent = text;
+  modelResult.classList.toggle("bad", error);
+}
+
+function renderModelFields() {
+  const mode = modelForm.elements.mode.value;
+  const fields = modelForm.elements;
+  const route = savedModelSettings.local_routes.find((entry) => entry.id === mode);
+  const custom = mode === "custom";
+  const editing = mode !== "environment";
+  $("#model-url-field").hidden = $("#model-auth-field").hidden = !custom;
+  $("#model-name-field").hidden = $("#model-key-field").hidden = !editing;
+  fields.base_url.disabled = fields.auth_kind.disabled = !custom;
+  fields.base_url.required = custom;
+  fields.model.required = editing;
+  fields.api_key.placeholder = savedModelSettings.key_configured && savedModelSettings.mode === mode
+    ? "已保存，留空则保留" : route ? "可选，留空使用路由默认凭据" : "输入 API Key";
+  $("#model-route-hint").textContent = route
+    ? `${route.label} · ${route.base_url} · ${route.reachable ? "端口可连接" : "端口未连接"}`
+    : custom
+      ? savedModelSettings.cloud
+        ? `支持 Anthropic Messages。可用的 HTTPS 域名：${savedModelSettings.allowed_hosts.join("、") || "无"}。本机路由请在本地工作台使用。`
+        : "填写支持 Anthropic Messages 的 Base URL。"
+      : savedModelSettings.default_configured ? "当前运行环境已配置模型凭据。" : "当前运行环境未配置模型凭据。";
+  $("#local-model-options").replaceChildren();
+  if (route?.reachable) {
+    api(`/api/settings/model/local/${mode}`).then((catalog) => {
+      if (modelForm.elements.mode.value !== mode) return;
+      $("#local-model-options").replaceChildren(...catalog.models.map((entry) =>
+        el("option", { value: entry.id, label: entry.name })));
+    }).catch(() => {});
+  }
+}
+
+function fillModelSettings(data) {
+  savedModelSettings = data;
+  for (const option of modelForm.elements.mode.options) {
+    if (["magpie", "ccswitch"].includes(option.value)) option.hidden = data.cloud;
+  }
+  const fields = modelForm.elements;
+  fields.mode.disabled = false;
+  fields.mode.value = data.mode;
+  fields.model.value = data.model;
+  fields.base_url.value = data.base_url;
+  fields.auth_kind.value = data.auth_kind;
+  fields.api_key.value = "";
+  renderModelFields();
+}
+
+async function loadModelSettings() {
+  modelSave.disabled = modelTest.disabled = true;
+  modelForm.elements.mode.disabled = true;
+  modelResult.hidden = true;
+  try {
+    fillModelSettings(await api("/api/settings/model"));
+    modelSave.disabled = modelTest.disabled = false;
+  } catch (error) { modelMessage(error.message, true); }
+}
+
+modelForm.elements.mode.addEventListener("change", () => {
+  const mode = modelForm.elements.mode.value;
+  modelForm.elements.api_key.value = "";
+  modelForm.elements.model.value = mode === savedModelSettings.mode ? savedModelSettings.model
+    : mode === "ccswitch" ? "claude-sonnet-5" : savedModelSettings.model;
+  renderModelFields();
+});
+
+modelForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  modelSave.disabled = modelTest.disabled = true;
+  try {
+    const data = Object.fromEntries(new FormData(modelForm));
+    fillModelSettings(await api("/api/settings/model", { method: "PUT", body: JSON.stringify(data) }));
+    modelMessage("模型设置已保存。");
+  } catch (error) { modelMessage(error.message, true); }
+  finally { modelSave.disabled = modelTest.disabled = false; }
+});
+
+modelTest.addEventListener("click", async () => {
+  modelSave.disabled = modelTest.disabled = true;
+  try {
+    const result = await api("/api/settings/model/test", { method: "POST" });
+    modelMessage(`模型 ${result.model} 已成功响应。`);
+  } catch (error) { modelMessage(error.message, true); }
+  finally { modelSave.disabled = modelTest.disabled = false; }
+});
 
 // ------------------------------------------------------------------ start
 
