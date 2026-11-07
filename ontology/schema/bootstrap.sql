@@ -21,3 +21,25 @@ CREATE TABLE IF NOT EXISTS onto_research.web_sessions (
     expires_at timestamptz NOT NULL
 );
 ALTER TABLE onto_research.web_sessions ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS onto_research.web_registered_users (
+    user_id text PRIMARY KEY,
+    provider text NOT NULL CHECK (provider IN ('sms', 'wechat')),
+    created_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE onto_research.web_registered_users ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS onto_research.web_sms_requests (
+    recipient_hash text NOT NULL,
+    sent_at timestamptz NOT NULL DEFAULT now()
+);
+ALTER TABLE onto_research.web_sms_requests ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS onto_research.web_auth_challenges (
+    token_hash text PRIMARY KEY,
+    provider text NOT NULL CHECK (provider IN ('sms', 'wechat')),
+    payload jsonb NOT NULL,
+    attempts int NOT NULL DEFAULT 0,
+    expires_at timestamptz NOT NULL
+);
+ALTER TABLE onto_research.web_auth_challenges ENABLE ROW LEVEL SECURITY;

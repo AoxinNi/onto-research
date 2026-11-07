@@ -46,11 +46,12 @@ def _owner_params() -> tuple[str | None, str | None]:
 
 
 def ensure_registry(conn: psycopg.Connection) -> None:
-    if conn.execute("SELECT to_regclass('onto_research.web_sessions') AS registry").fetchone()["registry"]:
+    if conn.execute("SELECT to_regclass('onto_research.web_auth_challenges') AS registry").fetchone()["registry"]:
         return
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(hashtext('onto_research.bootstrap'))")
-        conn.execute(REGISTRY.read_text(encoding="utf-8"))
+        if not conn.execute("SELECT to_regclass('onto_research.web_auth_challenges') AS registry").fetchone()["registry"]:
+            conn.execute(REGISTRY.read_text(encoding="utf-8"))
 
 
 def active_ids(conn: psycopg.Connection) -> list[str]:

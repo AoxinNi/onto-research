@@ -15,4 +15,4 @@ RUN python -m pip install --no-cache-dir .
 
 USER 10001:10001
 EXPOSE 8080
-CMD ["uvicorn", "workbench.cloud:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "workbench.cloud:create_app", "--factory", "--host", "0.0.0.0", "--port", "8080", "--no-access-log"]

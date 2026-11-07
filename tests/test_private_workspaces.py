@@ -178,7 +178,7 @@ def test_cloudbase_signin_uses_server_response(monkeypatch):
     def reply(request):
         assert request.url == f"https://{ENV_ID}.api.tcloudbasegateway.com/auth/v1/signin"
         assert request.method == "POST"
-        return httpx.Response(200, json={"sub": OWNER, "expires_in": 10000})
+        return httpx.Response(200, json={"sub": OWNER, "expires_in": 10000, "access_token": "opaque"})
 
     monkeypatch.setattr(auth.httpx, "AsyncClient",
                         lambda **kwargs: async_client(transport=httpx.MockTransport(reply), **kwargs))
