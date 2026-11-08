@@ -21,6 +21,7 @@ from . import auth, registration
 NO_STORE = {"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"}
 LOGIN_PAGE = Path(__file__).parent / "static" / "login.html"
 PRIVATE_COOKIE = {"secure": True, "httponly": True, "samesite": "lax", "path": "/"}
+API_VERSION = 1  # bumped when a change to the client API needs a newer desktop app
 
 
 class CloudAccess:
@@ -41,7 +42,10 @@ class CloudAccess:
         path = scope["path"]
         method = scope.get("method")
         connection = HTTPConnection(scope)
-        if kind == "websocket" or method not in ("GET", "HEAD", "OPTIONS"):
+        # Desktop requests carry their own bearer credential and never use cookies, so the CSRF Origin check
+        # that protects cookie sessions does not apply to them (see auth.py).
+        desktop = auth.desktop_client(connection.headers)
+        if not desktop and (kind == "websocket" or method not in ("GET", "HEAD", "OPTIONS")):
             if connection.headers.get("origin") != self.origin:
                 if kind == "websocket":
                     await send({"type": "websocket.close", "code": 1008})
@@ -49,9 +53,9 @@ class CloudAccess:
                     await JSONResponse({"detail": "请求来源无效。"}, 403, headers=NO_STORE)(scope, receive, send)
                 return
 
-        token = connection.cookies.get(auth.COOKIE, "")
+        token = auth.bearer_token(connection.headers) if desktop else connection.cookies.get(auth.COOKIE, "")
         if kind == "http":
-            response = await self.public_route(path, method, scope, receive, token)
+            response = await self.public_route(path, method, scope, receive, token, desktop)
             if response is not None:
                 await response(scope, receive, send)
                 return
@@ -86,25 +90,28 @@ class CloudAccess:
 
         await self.app(scope, receive, private_send)
 
-    async def public_route(self, path: str, method: str, scope: Scope, receive: Receive, token: str) -> Response | None:
+    async def public_route(self, path: str, method: str, scope: Scope, receive: Receive, token: str,
+                           desktop: bool = False) -> Response | None:
         if path == "/healthz" and method == "GET":
             return JSONResponse({"status": "ok"}, headers=NO_STORE)
         if path == "/login" and method == "GET":
             return FileResponse(LOGIN_PAGE, headers=NO_STORE)
         if path == "/auth/options" and method == "GET":
-            return JSONResponse({"providers": sorted(self.providers)}, headers=NO_STORE)
+            return JSONResponse({"mode": "cloud", "api": API_VERSION, "providers": sorted(self.providers)},
+                                headers=NO_STORE)
         if path == "/auth/logout" and method == "POST":
             await asyncio.to_thread(auth.end_session, token)
             response = Response(status_code=204, headers=NO_STORE)
-            response.delete_cookie(auth.COOKIE, **PRIVATE_COOKIE)
+            if not desktop:
+                response.delete_cookie(auth.COOKIE, **PRIVATE_COOKIE)
             return response
         if path == "/auth/login" and method == "POST":
-            return await self.login(Request(scope, receive), token)
+            return await self.login(Request(scope, receive), token, desktop)
         if path.startswith(("/auth/sms/", "/auth/wechat/")):
-            return await self.registration_route(path, method, Request(scope, receive), token)
+            return await self.registration_route(path, method, Request(scope, receive), token, desktop)
         return None
 
-    async def login(self, request: Request, previous_token: str) -> Response:
+    async def login(self, request: Request, previous_token: str, desktop: bool = False) -> Response:
         try:
             data = await _json_body(request)
             username, password = data["username"], data["password"]
@@ -124,35 +131,44 @@ class CloudAccess:
             return JSONResponse({"detail": "该账号尚未获邀。"}, 403, headers=NO_STORE)
 
         response = Response(status_code=204, headers=NO_STORE)
-        return await self.login_response(response, user_id, ttl, previous_token)
+        return await self.login_response(response, user_id, ttl, previous_token, desktop=desktop)
 
     async def login_response(self, response: Response, user_id: str, ttl: int, previous_token: str,
-                             provider: str | None = None, *, revoke_existing: bool = False) -> Response:
+                             provider: str | None = None, *, revoke_existing: bool = False,
+                             desktop: bool = False) -> Response:
         enrollment = provider if user_id not in self.allowed else None
+        if desktop:
+            ttl = auth.desktop_session_seconds()
         token = await asyncio.to_thread(auth.start_session, user_id, ttl, registration_provider=enrollment,
                                         revoke_existing=revoke_existing)
         await asyncio.to_thread(auth.end_session, previous_token)
+        if desktop:
+            # The desktop app stores this in the OS credential store; it is never exposed to its web view.
+            return JSONResponse({"token": token, "expires_in": ttl}, headers=NO_STORE)
         response.set_cookie(auth.COOKIE, token, max_age=ttl, **PRIVATE_COOKIE)
         return response
 
-    async def registration_route(self, path: str, method: str, request: Request, previous_token: str) -> Response:
+    async def registration_route(self, path: str, method: str, request: Request, previous_token: str,
+                                 desktop: bool = False) -> Response:
         provider = "sms" if path.startswith("/auth/sms/") else "wechat"
         if provider not in self.providers:
             return JSONResponse({"detail": "该注册方式暂未开放。"}, 404, headers=NO_STORE)
         try:
             if method == "POST" and path == "/auth/sms/send":
-                return await self.sms_send(request)
+                return await self.sms_send(request, desktop)
             if method == "POST" and path == "/auth/sms/complete":
-                return await self.sms_complete(request, previous_token)
+                return await self.sms_complete(request, previous_token, desktop)
             if method == "POST" and path == "/auth/wechat/start":
-                return await self.wechat_start()
-            if method == "GET" and path == registration.WECHAT_CALLBACK:
+                return await self.wechat_start(desktop)
+            if method == "POST" and path == "/auth/wechat/complete" and desktop:
+                return await self.wechat_desktop_complete(request, previous_token)
+            if method == "GET" and path == registration.WECHAT_CALLBACK and not desktop:
                 return await self.wechat_complete(request, previous_token)
         except auth.LoginError as error:
             return JSONResponse({"detail": str(error)}, error.status, headers=NO_STORE)
         return JSONResponse({"detail": "找不到此入口。"}, 404, headers=NO_STORE)
 
-    async def sms_send(self, request: Request) -> Response:
+    async def sms_send(self, request: Request, desktop: bool = False) -> Response:
         data = await _json_body(request)
         phone = registration.phone_number(data.get("phone"))
         intent = data.get("intent")
@@ -162,18 +178,20 @@ class CloudAccess:
         challenge, ttl = await registration.send_sms(self.env_id, phone)
         challenge["intent"] = intent
         token = await asyncio.to_thread(registration.create_challenge, "sms", challenge, ttl)
+        if desktop:
+            return JSONResponse({"retry_after": registration.SMS_COOLDOWN, "challenge": token}, headers=NO_STORE)
         response = JSONResponse({"retry_after": registration.SMS_COOLDOWN}, headers=NO_STORE)
         response.set_cookie(registration.SMS_COOKIE, token, max_age=ttl, **PRIVATE_COOKIE)
         return response
 
-    async def sms_complete(self, request: Request, previous_token: str) -> Response:
+    async def sms_complete(self, request: Request, previous_token: str, desktop: bool = False) -> Response:
         data = await _json_body(request)
         code = data.get("code")
         if not isinstance(code, str) or not registration.CODE.fullmatch(code):
             raise auth.LoginError(400, "请输入 6 位短信验证码。")
         phone = registration.phone_number(data.get("phone"))
         password = registration.new_password(data.get("password"))
-        token = request.cookies.get(registration.SMS_COOKIE, "")
+        token = _string(data.get("challenge")) if desktop else request.cookies.get(registration.SMS_COOKIE, "")
         challenge = await asyncio.to_thread(registration.sms_attempt, token)
         if auth.digest(phone) != challenge["phone_hash"]:
             raise auth.LoginError(400, "手机号已更换，请重新发送验证码。")
@@ -183,16 +201,21 @@ class CloudAccess:
         await asyncio.to_thread(registration.consume_challenge, token, "sms")
         user_id, ttl = await registration.sms_identity(self.env_id, challenge, phone, verification_token, password)
         response = Response(status_code=204, headers=NO_STORE)
-        response.delete_cookie(registration.SMS_COOKIE, **PRIVATE_COOKIE)
+        if not desktop:
+            response.delete_cookie(registration.SMS_COOKIE, **PRIVATE_COOKIE)
         return await self.login_response(response, user_id, ttl, previous_token, "sms",
-                                         revoke_existing=challenge["intent"] == "reset")
+                                         revoke_existing=challenge["intent"] == "reset", desktop=desktop)
 
-    async def wechat_start(self) -> Response:
+    async def wechat_start(self, desktop: bool = False) -> Response:
         state, device = secrets.token_urlsafe(32), secrets.token_hex(16)
         callback = self.origin + registration.WECHAT_CALLBACK
         uri = await registration.wechat_uri(self.env_id, callback, state, device)
         token = await asyncio.to_thread(registration.create_challenge, "wechat",
                                         {"state": state, "device": device}, registration.CHALLENGE_TTL)
+        if desktop:
+            # The app opens `url` in its own sign-in window and intercepts the redirect to the callback, so the
+            # challenge never leaves the process that started the flow.
+            return JSONResponse({"url": uri, "challenge": token}, headers=NO_STORE)
         response = JSONResponse({"url": uri}, headers=NO_STORE)
         response.set_cookie(registration.WECHAT_COOKIE, token, max_age=registration.CHALLENGE_TTL, **PRIVATE_COOKIE)
         return response
@@ -223,6 +246,26 @@ class CloudAccess:
         response.delete_cookie(registration.WECHAT_COOKIE, **PRIVATE_COOKIE)
         return response
 
+    async def wechat_desktop_complete(self, request: Request, previous_token: str) -> Response:
+        data = await _json_body(request)
+        state, code, token = _string(data.get("state")), _string(data.get("code")), _string(data.get("challenge"))
+        if not auth.SESSION_TOKEN.fullmatch(state):
+            raise auth.LoginError(400, "扫码请求已过期，请重新开始。")
+        try:
+            challenge = await asyncio.to_thread(registration.consume_challenge, token, "wechat", state)
+        except auth.LoginError:
+            raise auth.LoginError(400, "扫码请求已过期，请重新开始。") from None
+        if not re.fullmatch(r"[A-Za-z0-9_.-]{1,512}", code):
+            raise auth.LoginError(400, "微信授权已取消，可以重新扫码。")
+        try:
+            user_id, ttl = await registration.wechat_identity(
+                self.env_id, self.origin + registration.WECHAT_CALLBACK, code, challenge["device"],
+            )
+        except auth.LoginError:
+            raise auth.LoginError(502, "微信登录未完成，请重新扫码或联系工作台管理员。") from None
+        return await self.login_response(Response(status_code=204), user_id, ttl, previous_token, "wechat",
+                                         desktop=True)
+
     async def websocket(self, scope: Scope, receive: Receive, send: Send, token: str, user_id: str) -> None:
         closed = False
 
@@ -251,6 +294,10 @@ class CloudAccess:
             await self.app(scope, private_receive, private_send)
         except WebSocketDisconnect:
             return
+
+
+def _string(value: object) -> str:
+    return value if isinstance(value, str) else ""
 
 
 async def _json_body(request: Request) -> dict:

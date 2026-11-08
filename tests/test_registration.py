@@ -124,7 +124,7 @@ def callback(client, state, code="wx-code"):
 def test_closed_registration_and_password_still_require_admission(setup, monkeypatch):
     monkeypatch.delenv("WORKBENCH_REGISTRATION_PROVIDERS")
     with browser(cloud.create_app()) as client:
-        assert client.get("/auth/options").json() == {"providers": []}
+        assert client.get("/auth/options").json() == {"mode": "cloud", "api": 1, "providers": []}
         assert send_code(client).status_code == 404
         assert client.post("/auth/wechat/start").status_code == 404
         assert client.post("/auth/login", json={"username": "uninvited", "password": "password"}).status_code == 403
@@ -136,7 +136,7 @@ def test_sms_registers_then_password_signs_in_to_same_private_workspace(setup, c
     calls, _ = setup
     app = cloud.create_app()
     with browser(app) as client, browser(app) as other:
-        assert client.get("/auth/options").json() == {"providers": ["sms", "wechat"]}
+        assert client.get("/auth/options").json() == {"mode": "cloud", "api": 1, "providers": ["sms", "wechat"]}
         assert client.post("/auth/sms/send", headers={"origin": "https://untrusted.example"},
                            json={"phone": PHONE}).status_code == 403
         response = send_code(client)

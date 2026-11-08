@@ -1,5 +1,6 @@
 /* Project list and MCP page. Each card draws a small constellation of its project's busiest nodes. */
 import { typeOf } from "/static/vocab.js";
+import { confirmAction, currentView, download, go, request, routes } from "/static/net.js";
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -34,8 +35,8 @@ function toast(text, bad = false) {
 }
 
 async function api(url, opts = {}) {
-  const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
-  if (res.status === 401) location.replace("/login");
+  const res = await request(url, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (res.status === 401) go(routes.login, { replace: true });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `请求失败（${res.status}）`);
   return body;
@@ -47,7 +48,7 @@ function show(view, push = false) {
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== `view-${view}`;
   for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.view === view));
   document.title = `${{ mcp: "MCP 接入", sources: "数据源", settings: "平台设置" }[view] || "本体项目"} · 本体工作台`;
-  if (push) history.pushState({ view }, "", view === "projects" ? "/" : `/${view}`);
+  if (push) history.pushState({ view }, "", routes.view(view));
   if (view === "mcp") loadMcp();
   if (view === "sources") loadSources();
   if (view === "settings") loadModelSettings();
@@ -55,7 +56,7 @@ function show(view, push = false) {
 for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.view, true); });
 }
-const viewFromPath = () => ({ "/mcp": "mcp", "/sources": "sources", "/settings": "settings" })[location.pathname] || "projects";
+const viewFromPath = currentView;
 addEventListener("popstate", () => show(viewFromPath()));
 
 // ------------------------------------------------------------------ constellation
@@ -153,7 +154,7 @@ function renderProjects() {
 
 function card(p, i) {
   const st = p.stats || {};
-  const open = () => { location.href = `/p/${encodeURIComponent(p.id)}`; };
+  const open = () => go(routes.project(p.id));
   const menuBtn = el("button", { type: "button", class: "menu-btn", "aria-label": "更多操作", "aria-haspopup": "menu", "aria-expanded": "false",
     onclick: (e) => { e.stopPropagation(); toggleMenu(p, menuBtn); } },
     svg('<svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.3" fill="currentColor"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><circle cx="12.5" cy="8" r="1.3" fill="currentColor"/></svg>'));
@@ -186,7 +187,7 @@ function toggleMenu(p, btn) {
   const act = (fn) => (e) => { e.stopPropagation(); closeMenu(); fn(); };
   const menu = el("div", { class: "menu", role: "menu", onclick: (e) => e.stopPropagation() },
     el("button", { type: "button", role: "menuitem", onclick: act(() => openDialog(p)) }, "编辑名称和描述"),
-    el("button", { type: "button", role: "menuitem", onclick: act(() => { location.href = `/api/projects/${encodeURIComponent(p.id)}/export`; }) }, "导出 JSON"),
+    el("button", { type: "button", role: "menuitem", onclick: act(() => exportProject(p)) }, "导出 JSON"),
     !cloudWorkspace && el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
     el("button", { type: "button", role: "menuitem", class: p.status === "active" ? "danger" : "",
       onclick: act(() => setStatus(p, p.status === "active" ? "archived" : "active")) }, p.status === "active" ? "归档" : "恢复"),
@@ -196,8 +197,14 @@ function toggleMenu(p, btn) {
   openMenu = { menu, btn };
 }
 
+async function exportProject(p) {
+  try {
+    if (await download(`/api/projects/${encodeURIComponent(p.id)}/export`, `${p.id}.json`)) toast("已导出");
+  } catch (e) { toast(e?.message || String(e), true); }
+}
+
 async function setStatus(p, status) {
-  if (status === "archived" && !confirm(`归档「${p.name}」？归档后停止采集，数据保留，可以随时恢复。`)) return;
+  if (status === "archived" && !await confirmAction(`归档「${p.name}」？归档后停止采集，数据保留，可以随时恢复。`)) return;
   try {
     await api(`/api/projects/${encodeURIComponent(p.id)}`, { method: "PATCH", body: JSON.stringify({ status }) });
     toast(status === "archived" ? "已归档" : "已恢复");
@@ -235,7 +242,7 @@ $("#project-form").addEventListener("submit", async (e) => {
       const p = await api("/api/projects", { method: "POST", body });
       dialog.close();
       toast(`已创建「${p.name}」，正在打开工作台`);
-      setTimeout(() => { location.href = `/p/${encodeURIComponent(p.id)}`; }, 700);
+      setTimeout(() => go(routes.project(p.id)), 700);
     }
   } catch (err) { toast(err.message, true); }
   finally { $("#dialog-ok").disabled = false; }
@@ -444,7 +451,7 @@ function keyRow(p) {
     el("span", {}, "API Key ", el("code", {}, p.key_hint)),
     el("span", { class: "key-actions" },
       el("button", { type: "button", class: "link", onclick: () => row.replaceChildren(...editor()) }, "更换"),
-      el("button", { type: "button", class: "link danger", onclick: () => { if (confirm(`清除 ${p.name} 的 API Key？`)) save(""); } }, "清除"))), msg];
+      el("button", { type: "button", class: "link danger", onclick: async () => { if (await confirmAction(`清除 ${p.name} 的 API Key？`)) save(""); } }, "清除"))), msg];
   row.replaceChildren(...(p.configured ? view() : editor()));
   return row;
 }
@@ -587,9 +594,9 @@ $("#sign-out").addEventListener("click", async () => {
   const button = $("#sign-out");
   button.disabled = true;
   try {
-    const response = await fetch("/auth/logout", { method: "POST" });
+    const response = await request("/auth/logout", { method: "POST" });
     if (!response.ok) throw new Error();
-    location.replace("/login");
+    go(routes.login, { replace: true });
   } catch {
     button.disabled = false;
     toast("退出失败，请重试。", true);
@@ -597,9 +604,9 @@ $("#sign-out").addEventListener("click", async () => {
 });
 
 async function start() {
-  const session = await fetch("/auth/session").catch(() => null);
+  const session = await request("/auth/session").catch(() => null);
   if (session?.status === 401) {
-    location.replace("/login");
+    go(routes.login, { replace: true });
     return;
   }
   cloudWorkspace = session?.ok === true;
