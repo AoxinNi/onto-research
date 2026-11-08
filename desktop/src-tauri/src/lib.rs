@@ -172,8 +172,12 @@ async fn wechat_login(app: AppHandle, state: State<'_, AppState>) -> Result<()> 
 
 // ------------------------------------------------------------------ app
 
-/// The main window only ever shows the bundled pages.
-fn is_app_page(url: &Url) -> bool {
+/// The main window only ever shows the bundled pages. Under `tauri dev` those pages are served by the
+/// CLI's dev server (`dev_origin`, e.g. `http://127.0.0.1:1430`); release builds pass `None`.
+fn is_app_page(url: &Url, dev_origin: Option<&Url>) -> bool {
+    if dev_origin.is_some_and(|dev| dev.origin() == url.origin()) {
+        return true;
+    }
     match url.scheme() {
         "tauri" => url.host_str() == Some("localhost"),
         "http" | "https" => url.host_str() == Some("tauri.localhost"),
@@ -218,13 +222,14 @@ pub fn run() {
             log::info!("{APP_NAME} {} starting; server {}", env!("CARGO_PKG_VERSION"), settings.server);
             app.manage(AppState { settings: Mutex::new(settings), backend, sockets: Sockets::default() });
 
+            let dev_origin = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
             WebviewWindowBuilder::new(app, MAIN_WINDOW, WebviewUrl::App("index.html".into()))
                 .title(APP_NAME)
                 .inner_size(1360.0, 860.0)
                 .min_inner_size(960.0, 640.0)
                 .center()
-                .on_navigation(|url| {
-                    let allowed = is_app_page(url);
+                .on_navigation(move |url| {
+                    let allowed = is_app_page(url, dev_origin.as_ref());
                     if !allowed {
                         log::warn!("blocked navigation to {}", url.origin().ascii_serialization());
                     }
@@ -256,10 +261,22 @@ mod tests {
 
     #[test]
     fn main_window_stays_on_bundled_pages() {
-        assert!(is_app_page(&"tauri://localhost/home.html".parse().unwrap()));
-        assert!(is_app_page(&"http://tauri.localhost/workspace.html?project=a".parse().unwrap()));
-        assert!(!is_app_page(&"https://research.example/".parse().unwrap()));
-        assert!(!is_app_page(&"tauri://evil/home.html".parse().unwrap()));
-        assert!(!is_app_page(&"file:///etc/passwd".parse().unwrap()));
+        let page = |url: &str| is_app_page(&url.parse().unwrap(), None);
+        assert!(page("tauri://localhost/home.html"));
+        assert!(page("http://tauri.localhost/workspace.html?project=a"));
+        assert!(!page("https://research.example/"));
+        assert!(!page("tauri://evil/home.html"));
+        assert!(!page("file:///etc/passwd"));
+        assert!(!page("http://127.0.0.1:1430/index.html"));
+    }
+
+    #[test]
+    fn dev_builds_also_allow_the_cli_dev_server() {
+        let dev: Url = "http://127.0.0.1:1430".parse().unwrap();
+        let page = |url: &str| is_app_page(&url.parse().unwrap(), Some(&dev));
+        assert!(page("http://127.0.0.1:1430/home.html?view=settings"));
+        assert!(page("tauri://localhost/home.html"));
+        assert!(!page("http://127.0.0.1:8766/"));
+        assert!(!page("http://127.0.0.1:1431/index.html"));
     }
 }
