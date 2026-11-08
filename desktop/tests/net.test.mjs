@@ -9,7 +9,11 @@ let lastChannel = null;
 class Channel {
   constructor() { lastChannel = this; this.onmessage = null; }
 }
+const listeners = new Map();
 globalThis.__TAURI__ = {
+  event: {
+    listen: async (name, handler) => { listeners.set(name, handler); return () => listeners.delete(name); },
+  },
   core: {
     Channel,
     invoke: async (cmd, args) => {
@@ -94,4 +98,40 @@ test("dialogs and downloads use native commands", async () => {
   replies.set("download_file", true);
   assert.equal(await net.download("/api/projects/p/export", "p.json"), true);
   assert.deepEqual(calls.at(-1), ["download_file", { path: "/api/projects/p/export", filename: "p.json" }]);
+});
+
+test("file picks are uploaded by the Rust side and come back as Responses", async () => {
+  replies.set("upload_file", [{ filename: "睡眠.pdf", status: 200, body: '{"item":{"id":"it_1"}}', contentType: "application/json" }]);
+  const sent = await net.pickAndUpload("/api/library/upload?project=p", { accept: [".pdf", ".txt"], multiple: true });
+  assert.deepEqual(calls.at(-1), ["upload_file", { path: "/api/library/upload?project=p", extensions: ["pdf", "txt"], multiple: true }]);
+  assert.equal(sent[0].name, "睡眠.pdf");
+  assert.deepEqual(await sent[0].response.json(), { item: { id: "it_1" } });
+  replies.set("upload_file", []);
+  assert.deepEqual(await net.pickAndUpload("/api/library/upload"), []);
+});
+
+test("drops inside the element upload by ticket; drops elsewhere are ignored", async () => {
+  const classes = new Set();
+  const element = {
+    isConnected: true,
+    getBoundingClientRect: () => ({ left: 0, top: 0, right: 100, bottom: 100 }),
+    classList: { toggle: (c, on) => (on ? classes.add(c) : classes.delete(c)), remove: (c) => classes.delete(c) },
+  };
+  const got = [];
+  const stop = net.onFileDrop(element, (drops) => got.push(drops));
+  await new Promise((resolve) => setTimeout(resolve));
+  listeners.get("files-hover")({ payload: { x: 10, y: 10 } });
+  assert.ok(classes.has("dropping"));
+  listeners.get("files-dropped")({ payload: { ticket: "t1", files: [{ index: 0, name: "a.pdf" }], x: 500, y: 10 } });
+  assert.equal(got.length, 0);
+  listeners.get("files-dropped")({ payload: { ticket: "t2", files: [{ index: 0, name: "a.pdf" }], x: 50, y: 50 } });
+  assert.equal(got.length, 1);
+  assert.ok(!classes.has("dropping"));
+  replies.set("upload_dropped", { status: 200, body: "{}", contentType: "application/json" });
+  const res = await got[0][0].upload("/api/library/upload?project=p");
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.at(-1), ["upload_dropped", { ticket: "t2", index: 0, path: "/api/library/upload?project=p" }]);
+  stop();
+  await new Promise((resolve) => setTimeout(resolve));
+  assert.equal(listeners.size, 0);
 });

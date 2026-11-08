@@ -32,7 +32,9 @@ class BrokenReply(Exception):
 WRITE_TOOLS = {
     "upsert_node", "update_props", "create_link", "merge_nodes", "archive",
     "submit_changeset", "revert_changeset", "propose_type", "propose_binding", "add_evidence_note",
+    "add_item", "add_excerpt", "write_note", "append_note", "ground",
 }
+LIBRARY_TOOLS = {"add_item", "add_excerpt", "write_note", "append_note", "ground"}  # pages refresh their library view
 
 SYSTEM = mcp_server.INSTRUCTIONS + """
 You are working inside the ontology workbench: the user sees the graph on a canvas next to this chat, and every

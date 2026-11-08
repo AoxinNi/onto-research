@@ -26,6 +26,7 @@ from psycopg.conninfo import make_conninfo
 
 from .db import connect, migrate
 from .errors import OntologyError
+from .library import Library
 from .registry import DEFAULT_PACK, LEGACY_PACK, PACKS, load_seed
 from .store import OntologyStore
 
@@ -314,6 +315,18 @@ def export(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
                JOIN series s ON s.id = b.series_id WHERE b.status = 'active' AND s.source NOT IN ('news_heat', 'news_sentiment')
                ORDER BY b.created_at"""
         ).fetchall()
+        lib = Library(pc).export()
+        groundings = pc.execute(
+            """SELECT g.node_id, l.type AS link_type, l.from_id, l.to_id, g.item_id, g.excerpt_id, g.stance, g.rationale
+               FROM groundings g LEFT JOIN changesets c ON c.id = g.changeset_id LEFT JOIN links l ON l.id = g.link_id
+               WHERE g.status = 'active' AND (g.changeset_id IS NULL OR c.status = 'accepted') ORDER BY g.created_at"""
+        ).fetchall()
+    library = {}
+    if lib["items"] or lib["notes"]:  # only when there is one, so files from projects without a library stay as they were
+        library = {"library": {**lib, "groundings": [
+            {**({"node": g["node_id"]} if g["node_id"] else {"link": [g["link_type"], g["from_id"], g["to_id"]]}),
+             "item": g["item_id"], "excerpt": g["excerpt_id"], "stance": g["stance"], "rationale": g["rationale"]}
+            for g in groundings]}}
     return {
         "format": FORMAT,
         "exported_at": datetime.now(UTC).isoformat(),
@@ -326,6 +339,7 @@ def export(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
                    "valid_from": _iso(l["valid_from"]), "valid_to": _iso(l["valid_to"])} for l in links],
         "bindings": [{"node": b["node_id"], "role": b["role"], "source": b["source"], "params": b["params"],
                       "unit": b["unit"], "label": b["label"], "rationale": b["rationale"]} for b in bindings],
+        **library,
     }
 
 
@@ -382,10 +396,32 @@ def import_doc(conn: psycopg.Connection, doc: dict[str, Any], name: str | None =
                     raise OntologyError(f"binding refers to a node that is not in the file: {b.get('node')}")
                 human.bind_direct(refs[b["node"]], b["source"], b.get("params") or {}, b.get("role") or "value",
                                   b.get("rationale") or "导入", unit=b.get("unit"), label=b.get("label"))
+            if lib_doc := doc.get("library"):
+                _import_library(pc, human, lib_doc, refs)
     except (OntologyError, KeyError, TypeError) as e:
         drop(conn, p["id"])  # an import is all or nothing
         raise OntologyError(f"import failed: {e if isinstance(e, OntologyError) else f'missing field {e}'}") from None
     return summary(conn, get(conn, p["id"]))
+
+
+def _import_library(pc: psycopg.Connection, human: OntologyStore, doc: dict[str, Any], refs: dict[str, str]) -> None:
+    maps = Library(pc, actor="import").import_export(doc, refs)
+    for g in doc.get("groundings") or []:
+        if g.get("item") not in maps["items"]:
+            raise OntologyError(f"grounding refers to a source that is not in the file: {g.get('item')}")
+        if g.get("node"):
+            if g["node"] not in refs:
+                raise OntologyError(f"grounding refers to a node that is not in the file: {g['node']}")
+            target = refs[g["node"]]
+        else:
+            ltype, a, b = g["link"]
+            row = pc.execute("SELECT id FROM links WHERE type = %s AND from_id = %s AND to_id = %s AND status = 'active'",
+                             (ltype, refs.get(a), refs.get(b))).fetchone()
+            if not row:
+                raise OntologyError(f"grounding refers to a link that is not in the file: {ltype} {a} -> {b}")
+            target = row["id"]
+        human.ground_direct(target, maps["items"][g["item"]], g["stance"], g.get("rationale") or "导入",
+                            maps["excerpts"].get(g.get("excerpt")) if g.get("excerpt") else None)
 
 
 def drop(conn: psycopg.Connection, project_id: str) -> None:

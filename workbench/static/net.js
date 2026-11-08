@@ -74,6 +74,94 @@ export async function download(path, filename) {
   return invoke("download_file", { path, filename: filename || null });
 }
 
+// ------------------------------------------------------------------ files
+
+/* Sending files: in a browser the page reads the file and POSTs its bytes. In the desktop app the Rust side
+   opens the file dialog (or receives the drop), reads the file and POSTs it with the session token, so file
+   bytes never cross the IPC bridge as JSON. Either way the server gets the raw bytes plus X-Filename. */
+
+const asResponse = (res) => new Response([101, 204, 205, 304].includes(res.status) ? null : res.body, {
+  status: res.status,
+  headers: res.contentType ? { "content-type": res.contentType } : {},
+});
+
+function postFile(path, file) {
+  return fetch(path, {
+    method: "POST",
+    body: file,
+    headers: { "X-Filename": encodeURIComponent(file.name), "Content-Type": file.type || "application/octet-stream" },
+  });
+}
+
+/** Let the person pick files and POST each to `path`. Resolves to [{name, response}] (empty when cancelled).
+    accept: extensions such as [".pdf", ".txt"]. */
+export async function pickAndUpload(path, { accept = [], multiple = false } = {}) {
+  if (desktop) {
+    let sent;
+    try {
+      sent = await invoke("upload_file", { path, extensions: accept.map((x) => x.replace(/^\./, "")), multiple });
+    } catch (error) {
+      throw new TypeError(typeof error === "string" ? error : error?.message || "无法上传文件");
+    }
+    return sent.map((r) => ({ name: r.filename, response: asResponse(r) }));
+  }
+  const files = await new Promise((resolve) => {
+    const input = Object.assign(document.createElement("input"), { type: "file", multiple, accept: accept.join(",") });
+    input.addEventListener("change", () => resolve([...input.files]));
+    input.addEventListener("cancel", () => resolve([]));
+    input.click();
+  });
+  const out = [];
+  for (const file of files) out.push({ name: file.name, response: await postFile(path, file) });
+  return out;
+}
+
+/** Files dropped onto `element`. handler(drops) gets [{name, upload(path) -> Promise<Response>}]. Returns a
+    function that stops listening. */
+export function onFileDrop(element, handler) {
+  if (desktop) {
+    const events = globalThis.__TAURI__?.event;
+    if (!events) return () => {};
+    const hit = (x, y) => {
+      const r = element.getBoundingClientRect();
+      return element.isConnected && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    const subs = [
+      events.listen("files-hover", ({ payload }) => element.classList.toggle("dropping", hit(payload.x, payload.y))),
+      events.listen("files-leave", () => element.classList.remove("dropping")),
+      events.listen("files-dropped", ({ payload }) => {
+        element.classList.remove("dropping");
+        if (!hit(payload.x, payload.y)) return;
+        handler(payload.files.map((f) => ({
+          name: f.name,
+          upload: async (path) => asResponse(await invoke("upload_dropped", { ticket: payload.ticket, index: f.index, path })),
+        })));
+      }),
+    ];
+    return () => subs.forEach((p) => p.then((unlisten) => unlisten()));
+  }
+  const over = (e) => {
+    if (![...(e.dataTransfer?.types || [])].includes("Files")) return;
+    e.preventDefault();
+    element.classList.add("dropping");
+  };
+  const leave = (e) => { if (!element.contains(e.relatedTarget)) element.classList.remove("dropping"); };
+  const drop = (e) => {
+    if (!e.dataTransfer?.files?.length) return;
+    e.preventDefault();
+    element.classList.remove("dropping");
+    handler([...e.dataTransfer.files].map((file) => ({ name: file.name, upload: (path) => postFile(path, file) })));
+  };
+  element.addEventListener("dragover", over);
+  element.addEventListener("dragleave", leave);
+  element.addEventListener("drop", drop);
+  return () => {
+    element.removeEventListener("dragover", over);
+    element.removeEventListener("dragleave", leave);
+    element.removeEventListener("drop", drop);
+  };
+}
+
 export async function confirmAction(message) {
   return desktop ? invoke("confirm_dialog", { message }) : confirm(message);
 }

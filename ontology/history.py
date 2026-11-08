@@ -47,12 +47,20 @@ def snapshot(store: OntologyStore) -> dict[str, Any]:
         (list(ids),))]
     link_ids = {l["id"] for l in links}
     evidence = {k: v for k, v in summaries(conn).items() if k in link_ids}
-    return {"nodes": nodes, "links": links, "bindings": bindings, "evidence": evidence}
+    snap = {"nodes": nodes, "links": links, "bindings": bindings, "evidence": evidence}
+    groundings = [dict(r) for r in conn.execute(
+        f"""SELECT g.id, coalesce(g.node_id, g.link_id) AS target_id, g.item_id, g.excerpt_id, g.stance
+            FROM groundings g LEFT JOIN changesets c ON c.id = g.changeset_id
+            WHERE g.status = 'active' AND {ACCEPTED.format(t='g')} ORDER BY g.created_at""")
+        if r["target_id"] in ids or r["target_id"] in link_ids]
+    if groundings:  # only when there are some, so graphs from before groundings keep their content hash
+        snap["groundings"] = groundings
+    return snap
 
 
 def content_hash(snap: dict[str, Any]) -> str:
-    """What counts as a change: nodes, links and bindings. Evidence is recomputed hourly and is not a change."""
-    core = {k: snap[k] for k in ("nodes", "links", "bindings")}
+    """What counts as a change: nodes, links, bindings and groundings. Evidence is recomputed hourly and is not."""
+    core = {k: snap[k] for k in ("nodes", "links", "bindings", "groundings") if k in snap}
     return hashlib.sha256(json.dumps(core, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 
@@ -69,6 +77,9 @@ def diff_stats(before: dict[str, Any] | None, after: dict[str, Any]) -> dict[str
     ab = {(x["node_id"], x["role"], x["series_id"]) for x in (before or {}).get("bindings", [])}
     bb = {(x["node_id"], x["role"], x["series_id"]) for x in after["bindings"]}
     out["bindings_added"], out["bindings_removed"] = len(bb - ab), len(ab - bb)
+    ag = {x["id"] for x in (before or {}).get("groundings", [])}
+    bg = {x["id"] for x in after.get("groundings", [])}
+    out["groundings_added"], out["groundings_removed"] = len(bg - ag), len(ag - bg)
     out["nodes"], out["links"] = len(after["nodes"]), len(after["links"])
     return out
 
@@ -81,6 +92,8 @@ def describe(stats: dict[str, int]) -> str:
                 parts.append(f"{sign}{stats[f'{key}_{kind}']} {label}")
     if stats.get("bindings_added") or stats.get("bindings_removed"):
         parts.append(f"数据绑定 +{stats.get('bindings_added', 0)}/−{stats.get('bindings_removed', 0)}")
+    if stats.get("groundings_added") or stats.get("groundings_removed"):
+        parts.append(f"文献依据 +{stats.get('groundings_added', 0)}/−{stats.get('groundings_removed', 0)}")
     return "，".join(parts) or "无结构变化"
 
 
@@ -132,5 +145,15 @@ def graph_at(store: OntologyStore, commit_id: str) -> dict[str, Any]:
     return {
         "commit": {"id": row["id"], "parent": row["parent"], "author": row["author"], "message": row["message"],
                    "stats": row["stats"], "created_at": _iso(at)},
-        "graph": {"nodes": snap["nodes"], "links": snap["links"], "data": data, "evidence": snap.get("evidence", {})},
+        "graph": {"nodes": snap["nodes"], "links": snap["links"], "data": data, "evidence": snap.get("evidence", {}),
+                  "groundings": _grounding_summary(snap.get("groundings", []))},
     }
+
+
+def _grounding_summary(groundings: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """The shape OntologyStore.grounding_summary gives the canvas, from a snapshot's groundings."""
+    out: dict[str, dict[str, Any]] = {}
+    for g in groundings:
+        entry = out.setdefault(g["target_id"], {"pending": False})
+        entry[g["stance"]] = entry.get(g["stance"], 0) + 1
+    return out

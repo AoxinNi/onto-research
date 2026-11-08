@@ -32,3 +32,17 @@ export const lowerLayer = (layer) => layer === "company" || layer === "reasoning
 export const PROVENANCE = { user: "你提供的", llm_prior: "模型常识（待验证）", data_source: "数据" };
 export const FALLBACK = { label: "其他", color: "#9ca3af" };
 export const typeOf = (t) => TYPES[t] || { ...FALLBACK, label: t };
+
+/* Library: kinds of source, and how a source bears on a node or link (a grounding's stance). */
+export const KINDS = {
+  article: "期刊论文", preprint: "预印本", book: "图书", chapter: "章节", thesis: "学位论文", conference: "会议论文",
+  report: "报告", webpage: "网页", dataset: "数据集", software: "软件", other: "其他",
+};
+export const STANCES = {
+  states: { label: "陈述", tone: "ok", hint: "文献直接提出这一论断" },
+  supports: { label: "支持", tone: "ok", hint: "文献的发现支持它" },
+  contradicts: { label: "反驳", tone: "bad", hint: "文献的发现与它相反" },
+  qualifies: { label: "限定", tone: "warn", hint: "文献说明它只在某些条件下成立" },
+};
+/* Reasoning types that should rest on sources; the canvas marks them while they have none. */
+export const NEEDS_GROUNDING = new Set(["Claim", "Hypothesis", "Observation"]);

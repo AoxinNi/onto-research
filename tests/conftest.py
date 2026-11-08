@@ -19,6 +19,17 @@ LLM = {"kind": "llm_prior"}
 USER = {"kind": "user"}
 
 
+@pytest.fixture(autouse=True)
+def _no_resolver_network(monkeypatch):
+    """Metadata lookups never leave the machine in tests; a test that needs one patches resolve._fetch itself."""
+    from ontology import resolve
+
+    def refuse(*a, **k):
+        raise AssertionError("a test tried to reach a metadata service")
+
+    monkeypatch.setattr(resolve, "_fetch", refuse)
+
+
 @pytest.fixture
 def conn():
     params = conninfo_to_dict(TEST_URL)

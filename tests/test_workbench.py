@@ -112,6 +112,7 @@ def test_first_start_is_empty_and_new_projects_have_no_default_bindings(conn, mo
     from fastapi.testclient import TestClient
 
     from ontology import projects, series
+    from ontology.db import MIGRATIONS
     from tests.conftest import TEST_URL
     from workbench.server import app
 
@@ -126,6 +127,6 @@ def test_first_start_is_empty_and_new_projects_have_no_default_bindings(conn, mo
         assert project["stats"]["nodes"] == 0
         assert project["stats"]["feeds"] == 0
         with projects.project_connect(project["id"], TEST_URL) as db:
-            assert db.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == 9
+            assert db.execute("SELECT count(*) AS n FROM schema_migrations").fetchone()["n"] == len(list(MIGRATIONS.glob("*.sql")))
             assert db.execute("SELECT count(*) AS n FROM observations").fetchone()["n"] == 0
             assert series.load_templates() == []

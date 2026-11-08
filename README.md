@@ -21,6 +21,27 @@
 
 回滚说明：使用研究类型的项目不能用引入类型包之前的版本打开，旧版本不认识 `subject`/`reasoning` 层。
 
+### 文献库
+
+工作区左上角可以在「图谱」和「文献」之间切换。在文献模式里可以：
+
+- 按 DOI、arXiv 编号、ISBN、OpenAlex 编号或网址添加文献，元数据由对应服务返回；也可以上传 PDF 或文本，或者导入 BibTeX、RIS、CSL-JSON 文件。PDF 中印有 DOI 时会自动补全题录。
+- 阅读提取出的正文，选中一段生成摘录，再把摘录关联到图中的节点。关联有四种：陈述、支持、反驳、限定。这样的关联称为「依据」。你直接添加的依据立即生效；Agent 提出的依据和其他改动一样，要经过审核。两种依据都记入历史，可以撤销。
+- 写笔记。用 `[@引用键]` 引用文献，用 `[[n_…]]` 指向节点。
+
+Agent 只能通过标识符添加文献，不能自己填写题录。它写入的摘录必须能在正文中找到。图谱中没有依据的论断、假设和观测，标签前会显示 `◌`。
+
+相关环境变量：
+
+| 变量 | 默认值 | 作用 |
+| --- | --- | --- |
+| `WORKBENCH_LIBRARY_FILE_MB` | 50 | 单个文件的大小上限 |
+| `WORKBENCH_LIBRARY_PROJECT_MB` | 1024 | 一个项目所有文件的总量上限 |
+| `WORKBENCH_LIBRARY_FETCH_HOSTS` | doi.org、Crossref、DataCite、arXiv、OpenAlex、Open Library | 允许访问的元数据服务，逗号分隔 |
+| `WORKBENCH_LIBRARY_FETCH_ANY` | 本地为 `1`，云端为 `0` | 是否允许抓取任意网页。内网地址始终拒绝 |
+
+文献库功能新增了依赖 `pypdf`，升级后需要重新执行 `pip install -e '.[dev]'`。新的表由项目迁移 `010_library`、`011_groundings` 创建，工作台启动时会应用到所有已有项目（见「数据库迁移」）。
+
 ## 本地开发
 
 用 Python 3.11 或更新版本安装依赖。将 `.env.example` 复制为 `.env`，设置 PostgreSQL 的 `DATABASE_URL`。

@@ -121,10 +121,66 @@ pub fn safe_filename(name: &str) -> String {
     }
 }
 
+/// The file name a Content-Disposition header offers: RFC 5987 `filename*=UTF-8''…` (non-ASCII names) first,
+/// then the plain `filename=`.
 fn disposition_filename(headers: &HeaderMap) -> Option<String> {
     let value = headers.get(CONTENT_DISPOSITION)?.to_str().ok()?;
-    let name = value.split(';').find_map(|part| part.trim().strip_prefix("filename="))?;
-    Some(safe_filename(name.trim_matches('"')))
+    let parts: Vec<&str> = value.split(';').map(str::trim).collect();
+    let extended = parts.iter().find_map(|p| p.strip_prefix("filename*=")).and_then(|v| {
+        let (charset, rest) = v.split_once('\'')?;
+        let (_language, encoded) = rest.split_once('\'')?;
+        if charset.eq_ignore_ascii_case("utf-8") {
+            percent_decode(encoded)
+        } else {
+            None
+        }
+    });
+    let name = extended
+        .or_else(|| parts.iter().find_map(|p| p.strip_prefix("filename=")).map(|n| n.trim_matches('"').to_owned()))?;
+    Some(safe_filename(&name))
+}
+
+fn percent_decode(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            out.push(u8::from_str_radix(text.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A file name for the X-Filename header: percent-encoded UTF-8, which the server decodes.
+pub fn encode_filename(name: &str) -> String {
+    name.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect()
+}
+
+/// What an uploaded file is declared as; the server checks the bytes itself.
+pub fn media_type(filename: &str) -> &'static str {
+    let ext = filename.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "md" | "markdown" => "text/markdown",
+        "txt" => "text/plain",
+        "bib" | "bibtex" => "application/x-bibtex",
+        "ris" | "nbib" => "application/x-research-info-systems",
+        "json" => "application/json",
+        _ => "application/octet-stream",
+    }
 }
 
 pub struct Backend {
@@ -274,6 +330,35 @@ impl Backend {
             self.forget_token();
         }
         Ok(ApiResponse { status: status.as_u16(), body: text, content_type })
+    }
+
+    /// POST a file's raw bytes (a pick from the file dialog or a drop) with its name in X-Filename. Only
+    /// `/api/` paths, and the same session handling as `request`.
+    pub async fn send_bytes(&self, path: &str, filename: &str, bytes: Vec<u8>) -> Result<ApiResponse> {
+        validate_path(path, false)?;
+        if !path.starts_with("/api/") {
+            return Err(AppError::user("不支持的请求地址。"));
+        }
+        if bytes.len() > MAX_BODY {
+            return Err(AppError::user("文件过大。"));
+        }
+        let mut request = self
+            .http
+            .post(self.url(path)?)
+            .header(ACCEPT, "application/json")
+            .header(CONTENT_TYPE, media_type(filename))
+            .header("x-filename", encode_filename(filename))
+            .body(bytes);
+        if let Some(token) = self.token() {
+            request = request.header(AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let response = request.send().await?;
+        log::info!("POST {} (file) -> {}", path.split('?').next().unwrap_or_default(), response.status().as_u16());
+        let (status, content_type, body) = Self::read(response).await?;
+        if status == StatusCode::UNAUTHORIZED {
+            self.forget_token();
+        }
+        Ok(ApiResponse { status: status.as_u16(), body: String::from_utf8_lossy(&body).into_owned(), content_type })
     }
 
     /// Download a file the server offers (an export). Returns its bytes and the server's file name.
@@ -448,6 +533,24 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename=\"btc.json\""));
         assert_eq!(disposition_filename(&headers).as_deref(), Some("btc.json"));
+        headers.insert(
+            CONTENT_DISPOSITION,
+            HeaderValue::from_static(
+                "attachment; filename=\"___.pdf\"; filename*=UTF-8''%E7%9D%A1%E7%9C%A0%2F..%2Fx.pdf",
+            ),
+        );
+        assert_eq!(disposition_filename(&headers).as_deref(), Some("睡眠_.._x.pdf"));
+        headers.insert(CONTENT_DISPOSITION, HeaderValue::from_static("attachment; filename*=UTF-8''%E7%9D"));
+        assert_eq!(disposition_filename(&headers), None);
+    }
+
+    #[test]
+    fn upload_names_and_types() {
+        assert_eq!(encode_filename("睡眠 a.pdf"), "%E7%9D%A1%E7%9C%A0%20a.pdf");
+        assert_eq!(percent_decode(&encode_filename("a/b 文献.bib")).as_deref(), Some("a/b 文献.bib"));
+        assert_eq!(media_type("Paper.PDF"), "application/pdf");
+        assert_eq!(media_type("refs.bib"), "application/x-bibtex");
+        assert_eq!(media_type("noext"), "application/octet-stream");
     }
 
     mod http {
@@ -602,6 +705,26 @@ mod tests {
                 .mount(&server)
                 .await;
             (server, backend, store)
+        }
+
+        #[tokio::test]
+        async fn files_go_up_as_raw_bytes_with_their_name() {
+            let (server, backend, store) = backend().await;
+            store.set(&server.uri(), TOKEN).unwrap();
+            Mock::given(method("POST"))
+                .and(path("/api/library/upload"))
+                .and(header("authorization", format!("Bearer {TOKEN}").as_str()))
+                .and(header("x-filename", "%E7%9D%A1%E7%9C%A0.pdf"))
+                .and(header("content-type", "application/pdf"))
+                .and(wiremock::matchers::body_bytes(b"%PDF-1.4 x".to_vec()))
+                .respond_with(ResponseTemplate::new(200).set_body_raw(r#"{"item":{}}"#, "application/json"))
+                .mount(&server)
+                .await;
+            let sent =
+                backend.send_bytes("/api/library/upload?project=a", "睡眠.pdf", b"%PDF-1.4 x".to_vec()).await.unwrap();
+            assert_eq!(sent.status, 200);
+            assert!(backend.send_bytes("/auth/login", "x.pdf", vec![1]).await.is_err());
+            assert!(backend.send_bytes("/api/../x", "x.pdf", vec![1]).await.is_err());
         }
 
         #[tokio::test]

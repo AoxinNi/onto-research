@@ -10,6 +10,8 @@
     "allow-session-boot",
     "allow-api-request",
     "allow-download-file",
+    "allow-upload-file",
+    "allow-upload-dropped",
     "allow-confirm-dialog",
     "allow-open-external",
     "allow-socket-open",

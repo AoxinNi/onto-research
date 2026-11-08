@@ -36,7 +36,7 @@ from ontology.registry import DEFAULT_PACK, PACKS
 from ontology.store import OntologyStore
 
 from . import agent as agent_mod
-from . import auth, model_settings, sessions
+from . import auth, library_api, model_settings, sessions
 from .agent import WorkbenchAgent
 from .auth import WorkspaceScope
 from .cloud import _json_body
@@ -595,7 +595,7 @@ def get_node_news(node_id: str, project: str = Project) -> list[dict[str, Any]]:
 @app.get("/api/links/{link_id}/evidence")
 def get_link_evidence(link_id: str, project: str = Project) -> dict[str, Any]:
     with human_store(project) as s:
-        return evidence.link_evidence(s.conn, link_id)
+        return {**evidence.link_evidence(s.conn, link_id), "groundings": s.groundings(target_id=link_id)}
 
 
 @app.get("/api/changesets/{cs}")
@@ -739,8 +739,11 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
     async def emit(event: dict[str, Any]) -> None:
         await ws.send_json(event)
         await asyncio.to_thread(record, event)
-        if event.get("type") == "tool" and event.get("writes") and event.get("ok"):
-            await broadcast(project, snapshot(project))
+        if event.get("type") == "tool" and event.get("ok"):
+            if event.get("writes"):
+                await broadcast(project, snapshot(project))
+            if event.get("name") in agent_mod.LIBRARY_TOOLS:
+                await broadcast(project, {"type": "library"})
 
     try:
         await ws.accept()
@@ -766,6 +769,11 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
                 continue
             text = msg["text"].strip()
             await asyncio.to_thread(record, {"type": "user", "text": text})
+            if msg.get("context"):  # what the page shows (a source, an excerpt, a note), for the agent only
+                try:
+                    text = await asyncio.to_thread(library_api.chat_context, project, msg["context"]) + text
+                except HTTPException:
+                    pass
             if agent_lock.locked():
                 await ws.send_json({"type": "status", "busy": True, "text": "另一个对话正在修改图，稍等一下。"})
             async with agent_lock:
@@ -804,6 +812,9 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
     finally:
         clients.get(project, set()).discard(ws)
         pconn.close()
+
+
+library_api.install(app, broadcast=broadcast, snapshot=snapshot, record_history=record_history)
 
 
 def main() -> None:

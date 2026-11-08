@@ -127,7 +127,7 @@ link_types:
 
 ## 3. 数据模型与迁移
 
-所有表都在项目 schema 内，由 `ontology/migrations/` 依次应用；每个项目首次连接时由 `migrate()` 执行。
+所有表都在项目 schema 内，由 `ontology/migrations/` 依次应用；工作台启动时由 `projects.upgrade_all()` 应用到所有已有项目，新项目创建时直接应用。
 
 ### 3.1 `010_library.sql`：文献、文件、全文分块、摘录、笔记
 
@@ -565,7 +565,7 @@ WebSocket 新增事件 `{"type":"manuscript","id":…,"sections":[…]}` 和 `{"
 | 期 | 内容 | 完成标准 |
 | --- | --- | --- |
 | **P0 类型包**（已完成） | `packs/research.yaml` 与 `market.yaml`，新增 layer 值，`projects.pack`，新建项目时选择类型包，`add-pack` 及同名类型合并，画布对两个新 layer 的画法，Agent 说明和研报提示词按类型包区分 | 新项目默认使用研究类型，能建出 Q/H/C/O 并连上关系；已有 BTC 项目不受影响，追加研究类型后 `validate_graph` 没有违规项；测试覆盖类型合并和旧导出文件的导入 |
-| **P1 文献库与依据** | 010/011 迁移；文献接口；DOI/arXiv/ISBN/URL 解析；PDF 上传与文本提取；BibTeX/RIS 导入；摘录与原文校验；笔记；依据接入变更集，支持撤销和历史；§5.1–5.2 的 MCP 工具；文献模式界面；图谱模式的「依据」区和「无依据」标记；桌面端 `upload_file`、`upload_dropped`、`api_bytes` | 网页端和桌面端都能拖入 PDF、看到全文、选中原文生成摘录并关联节点；Agent 能按 DOI 加入文献、写入经过校验的摘录、提出依据，人工接受后进入历史，撤销后干净回退；pytest 覆盖依据的撤销和合并、摘录校验、上传大小上限、SSRF 防护，cargo test 覆盖票据和字节通道 |
+| **P1 文献库与依据**（已实现，桌面端拖放尚未在打包后的应用中实测） | 010/011 迁移；文献接口；DOI/arXiv/ISBN/URL 解析；PDF 上传与文本提取；BibTeX/RIS 导入；摘录与原文校验；笔记；依据接入变更集，支持撤销和历史；§5.1–5.2 的 MCP 工具；文献模式界面；图谱模式的「依据」区和「无依据」标记；桌面端 `upload_file`、`upload_dropped`、`api_bytes` | 网页端和桌面端都能拖入 PDF、看到全文、选中原文生成摘录并关联节点；Agent 能按 DOI 加入文献、写入经过校验的摘录、提出依据，人工接受后进入历史，撤销后干净回退；pytest 覆盖依据的撤销和合并、摘录校验、上传大小上限、SSRF 防护，cargo test 覆盖票据和字节通道 |
 | **P2 论文与导出** | 012 迁移；写作模式（大纲、分节编辑、自动保存与 409 处理、引用补全、预览）；改稿建议的对比显示与接受；引用检查；pandoc 导出 DOCX/LaTeX/MD/BibTeX；研报插入为草稿节；§5.3 的工具 | 能写一篇带十几条 GB/T 7714 引用的中文论文，导出的 DOCX 中参考文献格式正确，LaTeX zip 能用 `latexmk -xelatex` 直接编译；Agent 提交的改稿建议能逐条接受；两个页面同时编辑同一节时出现冲突提示 |
 | P3 以后 | pdf.js 阅读器和 PDF 内高亮；Zotero 同步；`search_scholarly` 扩展到 Semantic Scholar；语义检索（看 pgvector 是否可用）；图表与交叉引用；所见即所得编辑器；对象存储 | 另行设计 |
 
@@ -578,6 +578,22 @@ WebSocket 新增事件 `{"type":"manuscript","id":…,"sections":[…]}` 和 `{"
 - 工作区快照中的 `project` 增加 `packs` 字段。只有 market 项目在节点详情里显示新闻区块。
 - CLI 命令为 `project-add-pack <id> research`。HTTP 接口为 `GET /api/packs` 和 `POST /api/projects/{id}/packs/{pack}`。
 - 回滚：使用研究类型的项目不能用旧版本打开（旧版本不认识 `subject`/`reasoning` 层），已写进 README。
+
+### P1 实施记录（与上文的差异）
+
+- **迁移**：010/011 只是新增的编号迁移文件，已发布的迁移不改动。已有项目由启动时的 `projects.upgrade_all()` 升级（`WORKBENCH_AUTO_MIGRATE=0` 时由运维执行 `python -m ontology.cli migrate`）；打开项目时不再单独执行迁移。
+- **导入不依赖 pandoc**：BibTeX、RIS、CSL-JSON 的解析和 BibTeX 导出都用纯 Python 实现（`ontology/bibio.py`），pandoc 只留给 P2 的论文导出。
+- **抓取规则**（`ontology/resolve.py`）：只访问 `WORKBENCH_LIBRARY_FETCH_HOSTS` 中的服务（默认是 DOI、Crossref、DataCite、arXiv、OpenAlex、Open Library），而且只走 HTTPS；重定向最多 3 次，每一跳都重新检查；响应有大小上限。抓取任意网页需要 `WORKBENCH_LIBRARY_FETCH_ANY=1`，本地默认开启，云端（设置了 `WORKBENCH_CLOUDBASE_ENV_ID`）默认关闭；非公网地址一律拒绝。剩余风险：地址检查在连接之前进行，DNS 在检查和连接之间改变解析结果时防不住，所以有敏感内网的服务器不要开启 FETCH_ANY。
+- **网址就是标识符**：没有单独的 `/api/library/capture`，`POST /api/library {identifier}` 也接受网址。网页正文保存为 `text/x-web-extract` 文件。
+- **上传**：`POST /api/library/upload` 先用文件名建条目。PDF 前几页里找到 DOI 时，用 DOI 补全题录并重新生成引用键；如果文献库里已有这个 DOI，文件挂到已有条目下，新条目删掉。
+- **依据的移除**：人直接添加的依据（`changeset_id` 为空）直接移除。经过审核的依据，在页面上移除时会建一个人工变更集并立即接受，所以这次移除也能撤销、也记入历史。
+- **历史兼容**：快照里只有存在依据时才写入 `groundings` 键，没有文献的项目内容哈希不变，不会凭空多出一次提交。
+- **聊天上下文**：在文献模式里发消息时，页面附带 `context: {item_id, page, excerpt_id, note_id}`，服务端把它换成一行「我正在看：…」放在消息前面。只传编号，由服务端查标题和摘录原文。
+- **页面通知**：文献库变化广播 `{"type": "library", item?, note?}`；依据变化广播新的图快照。页面在有对话框、输入框有焦点或正在阅读正文时不重绘。
+- **项目导出**：有文献或笔记时导出文件才带 `library` 键（条目、摘录、笔记、已生效的依据），不含文件本身。导入时重建引用键、摘录和依据，并改写笔记正文里的节点编号和摘录编号。
+- **推迟到 P3**：`api_bytes` 和 pdf.js 阅读器、正文内的摘录高亮、三元组（trigram）索引（P1 的检索用 ILIKE 匹配元数据和正文块）。浏览器可以用 `GET /api/library/files/{id}?inline=1` 直接打开 PDF。
+- **界面范围**：「关联到节点」对话框只能选节点；关系上的依据目前由 Agent 或接口添加。
+- **桌面端**：`upload_file` 用系统文件对话框选文件，`upload_dropped` 处理拖放。拖放事件在 Rust 侧收到，页面只拿到文件名和一次性票据（有效期 120 秒，每个文件只能上传一次），拿不到磁盘路径。字节由 `Backend::send_bytes` 直接发给服务器，不经过 IPC 的 JSON。`disposition_filename` 支持 RFC 5987 的 `filename*`。
 
 依赖关系是 P0 → P1 → P2，三期都会改 `store.py`、`mcp_server.py`、`app.js` 和 `index.html`，**不适合并行开发**。P1 内部，桌面端的 Rust 命令可以和服务端同时开发，前提是先确定接口。
 

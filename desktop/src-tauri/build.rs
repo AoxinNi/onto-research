@@ -6,6 +6,8 @@ fn main() {
         "session_boot",
         "api_request",
         "download_file",
+        "upload_file",
+        "upload_dropped",
         "confirm_dialog",
         "open_external",
         "socket_open",

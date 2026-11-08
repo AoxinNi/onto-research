@@ -1,7 +1,8 @@
 /* 本体工作台：三维星图 + 对话 + 审核。图数据来自服务端快照，前端只做增量合并、布局和视觉状态。 */
 import { ForceGraph3D, THREE, CSS2DRenderer, CSS2DObject, UnrealBloomPass } from "/static/vendor/graph3d.js";
-import { TYPES, LINKS, LAYERS, PROVENANCE, lowerLayer, typeOf } from "/static/vocab.js";
+import { TYPES, LINKS, LAYERS, PROVENANCE, NEEDS_GROUNDING, STANCES, lowerLayer, typeOf } from "/static/vocab.js";
 import { currentProject, go, request, routes, socket } from "/static/net.js";
+import { initLibrary } from "/static/library.js";
 
 // Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
 const PROJECT = currentProject();
@@ -329,6 +330,7 @@ function styleNode(n) {
   v.el.querySelector(".t").textContent = t.label;
   v.el.classList.toggle("hub", (n.__deg || 0) >= HUB_DEGREE);
   v.el.classList.toggle("pending", !!n.pending);
+  v.el.classList.toggle("ungrounded", NEEDS_GROUNDING.has(n.type) && !graph.groundings?.[n.id]);
   const d = primaryData(n);
   const val = v.el.querySelector(".v");
   val.replaceChildren();
@@ -864,6 +866,7 @@ function renderNode(box, n) {
     for (const d of data) box.append(dataCard(d));
   }
   if (projectPacks.includes("market")) box.append(newsSection(n.id));
+  if (NEEDS_GROUNDING.has(n.type) || graph.groundings?.[n.id]) box.append(groundingSection(n.id, NEEDS_GROUNDING.has(n.type)));
   const props = Object.entries(n.props || {});
   if (props.length) {
     box.append(el("h3", {}, "属性"));
@@ -991,7 +994,37 @@ function renderLink(box, l) {
       el("span", { class: "dir" }, dir), el("span", { class: "who" }, el("em", {}, typeOf(n.type).label), n.name), svg(ICON.go))));
   }
   box.append(el("h3", {}, "两端"), ends);
+  if (graph.groundings?.[l.id]) box.append(groundingSection(l.id, false));
   box.append(evidenceSection(l.id));
+}
+
+function groundingSection(targetId, wanted) {
+  const summary = graph.groundings?.[targetId];
+  const count = summary ? Object.entries(summary).filter(([k]) => k !== "pending").reduce((a, [, v]) => a + v, 0) : 0;
+  const wrap = el("section", { class: "groundings" },
+    el("h3", {}, el("span", {}, "文献依据"), el("span", {}, count ? String(count) : "无")));
+  if (!count) {
+    wrap.append(el("p", { class: "news-empty" }, wanted ? "还没有文献依据。在文献模式里选中一段原文，关联到这个节点；或者让 Agent 去找。" : "还没有文献依据。"),
+      el("div", { class: "g-acts" },
+        el("button", { type: "button", class: "btn sm", onclick: () => setMode("library") }, "打开文献库"),
+        el("button", { type: "button", class: "btn sm", onclick: () => askAgent(`请在文献库和学术检索里为「${nodes.get(targetId)?.name ?? targetId}」找依据，读原文后用 ground 关联。`) }, "让 Agent 找")));
+    return wrap;
+  }
+  const list = el("div", {}, el("p", { class: "news-empty" }, "读取中…"));
+  wrap.append(list);
+  request(q(`/api/groundings?target_id=${encodeURIComponent(targetId)}`)).then((r) => r.json()).then((gs) => {
+    list.replaceChildren(...gs.map((g) => {
+      const st = STANCES[g.stance] || { label: g.stance, tone: "dim" };
+      return el("button", { type: "button", class: "g-card", onclick: () => { setMode("library"); library.openItem(g.item_id, g.excerpt_id ? "excerpts" : "groundings"); } },
+        el("div", { class: "g-head" }, el("span", { class: `stance ${st.tone}` }, st.label),
+          el("span", { class: "g-cite" }, `${(g.authors || "佚名").split(";")[0].split(",")[0]} ${g.year ?? ""}`.trim()),
+          (g.cs_status === "open" || g.cs_status === "pending") && el("span", { class: "badge warn" }, "待审核")),
+        el("div", { class: "g-title" }, g.item_title),
+        g.quote && el("blockquote", {}, g.quote.length > 220 ? `${g.quote.slice(0, 220)}…` : g.quote, g.page != null ? el("small", {}, ` 第 ${g.page} 页`) : null),
+        g.rationale && el("p", { class: "g-why" }, g.rationale));
+    }));
+  }).catch(() => list.replaceChildren(el("p", { class: "news-empty" }, "依据读取失败")));
+  return wrap;
 }
 
 const VERDICT = { supports: ["支持", "ok"], reverse: ["方向相反", "warn"], contradicts: ["反驳", "bad"], weak: ["弱", "dim"], insufficient: ["数据不足", "dim"] };
@@ -1580,6 +1613,42 @@ function showProject(p) {
   document.title = `${p.name} · 本体工作台`;
 }
 
+// ------------------------------------------------------------------ modes: graph / library
+
+let mode = "graph";
+let chatContext = null;      // what the library shows, sent with chat messages so the agent knows
+const library = initLibrary({
+  root: $("#library"),
+  q,
+  toast,
+  nodes: () => graph.nodes,
+  openNode: (id) => {
+    if (!nodes.has(id)) { toast("这个节点不在当前的图里", true); return; }
+    setMode("graph");
+    select({ kind: "node", id }, true);
+  },
+  setContext: (ctx) => { chatContext = ctx; },
+  askAgent: (text, now = true) => askAgent(text, now),
+});
+
+function setMode(next) {
+  if (next === mode) return;
+  mode = next;
+  document.body.classList.toggle("mode-library", mode === "library");
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.setAttribute("aria-checked", String(b.dataset.mode === mode));
+  if (mode === "library") { select(null); library.show(); } else library.hide();
+  history.replaceState(null, "", mode === "library" ? "#library" : location.pathname + location.search);
+}
+for (const b of document.querySelectorAll("#modes [data-mode]")) b.addEventListener("click", () => setMode(b.dataset.mode));
+
+function askAgent(text, now = true) {
+  if (document.body.classList.contains("panel-collapsed")) dockActions.panel();
+  if (panelTab !== "chat") setTab("chat");
+  if (now && !busy) { send(text); return; }
+  input.value = input.value ? `${input.value}\n${text}` : text;
+  autosize(); syncSend(); input.focus();
+}
+
 let ws;
 function setConn(state) {
   const c = $("#conn");
@@ -1599,6 +1668,7 @@ function connect() {
       if (msg.news_refreshed != null && lastRefresh) toast(msg.news_refreshed ? `新闻已更新：${msg.news_refreshed} 篇新报道` : "新闻已是最新");
     }
     else if (msg.type === "history") loadHistory();
+    else if (msg.type === "library") library.onMessage(msg);
     else if (msg.type === "session") showSession(msg);
     else if (msg.type === "report") {
       if (viewingAt) return;
@@ -1621,12 +1691,14 @@ function connect() {
   };
 }
 connect();
+if (location.hash === "#library") setMode("library");
 addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
 
 function send(text = input.value.trim()) {
   if (!text || busy || ws.readyState !== WebSocket.OPEN) return;
   log("user", text);
-  ws.send(JSON.stringify({ type: "chat", text }));
+  const context = mode === "library" ? chatContext : null;
+  ws.send(JSON.stringify({ type: "chat", text, ...(context ? { context } : {}) }));
   input.value = "";
   autosize();
   syncSend();
