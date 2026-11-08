@@ -28,12 +28,17 @@ form.addEventListener("submit", async (event) => {
 });
 
 const panel = document.querySelector("#register-panel");
-const smsSend = document.querySelector("#sms-send");
+const title = document.querySelector("#register-title");
+const smsForm = document.querySelector("#sms-form");
 const smsComplete = document.querySelector("#sms-complete");
+const modeButton = document.querySelector("#sms-mode");
 const wechat = document.querySelector("#wechat-start");
 const message = document.querySelector("#register-message");
-const sendButton = smsSend.querySelector("button");
+const sendButton = document.querySelector("#sms-send");
+const submitButton = smsComplete.querySelector("button");
+const { phone, code, password } = smsForm.elements;
 let canResendAt = 0;
+let intent = "register";
 
 function showMessage(text, failed = false) {
   message.hidden = false;
@@ -59,41 +64,62 @@ function updateResend() {
   if (remaining > 0) setTimeout(updateResend, 1000);
 }
 
-smsSend.addEventListener("submit", async (event) => {
-  event.preventDefault();
+function showSmsFields(visible) {
+  smsComplete.hidden = !visible;
+  code.disabled = password.disabled = submitButton.disabled = !visible;
+  code.value = password.value = "";
+}
+
+sendButton.addEventListener("click", async () => {
+  if (phone.readOnly || !phone.reportValidity()) return;
   sendButton.disabled = true;
+  phone.readOnly = modeButton.disabled = true;
+  showSmsFields(false);
   message.hidden = true;
   try {
-    const result = await authRequest("/auth/sms/send", { phone: smsSend.elements.phone.value });
+    const result = await authRequest("/auth/sms/send", { phone: phone.value, intent });
     canResendAt = Date.now() + result.retry_after * 1000;
-    smsComplete.reset();
-    smsComplete.hidden = false;
-    smsComplete.elements.code.focus();
+    showSmsFields(true);
+    code.focus();
     showMessage("验证码已发送。");
-    updateResend();
   } catch (error) {
     showMessage(error.message, true);
+  } finally {
+    phone.readOnly = modeButton.disabled = false;
     updateResend();
   }
 });
 
-smsSend.elements.phone.addEventListener("input", () => {
-  smsComplete.hidden = true;
+phone.addEventListener("input", () => {
+  showSmsFields(false);
+  message.hidden = true;
 });
 
-smsComplete.addEventListener("submit", async (event) => {
+modeButton.addEventListener("click", () => {
+  intent = intent === "register" ? "reset" : "register";
+  const reset = intent === "reset";
+  title.textContent = reset ? "设置或重设密码" : "手机号注册";
+  modeButton.textContent = reset ? "返回手机号注册" : "已有账号？设置或重设密码";
+  submitButton.textContent = reset ? "验证并保存密码" : "验证并注册";
+  showSmsFields(false);
+  message.hidden = true;
+});
+
+smsForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const submit = smsComplete.querySelector("button");
-  submit.disabled = true;
+  if (submitButton.disabled) return;
+  submitButton.disabled = phone.readOnly = modeButton.disabled = true;
   try {
     await authRequest("/auth/sms/complete", {
-      phone: smsSend.elements.phone.value,
-      code: smsComplete.elements.code.value,
+      phone: phone.value,
+      code: code.value,
+      password: password.value,
+      intent,
     });
     location.replace("/");
   } catch (error) {
     showMessage(error.message, true);
-    submit.disabled = false;
+    submitButton.disabled = phone.readOnly = modeButton.disabled = false;
   }
 });
 
@@ -114,7 +140,8 @@ async function showRegistrationOptions() {
   const { providers } = await response.json();
   if (!providers.length) return;
   panel.hidden = false;
-  smsSend.hidden = !providers.includes("sms");
+  smsForm.hidden = !providers.includes("sms");
+  if (!smsForm.hidden) title.textContent = "手机号注册";
   wechat.hidden = !providers.includes("wechat");
   const error = new URLSearchParams(location.search).get("error");
   const errors = new Map([

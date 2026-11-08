@@ -116,7 +116,8 @@ class CloudAccess:
         except (ValueError, KeyError, TypeError):
             return JSONResponse({"detail": "请输入账号和密码。"}, 400, headers=NO_STORE)
         try:
-            user_id, ttl = await auth.cloudbase_sign_in(self.env_id, username, password)
+            account = registration.normalized_phone(username) or username
+            user_id, ttl = await auth.cloudbase_sign_in(self.env_id, account, password)
         except auth.LoginError as error:
             return JSONResponse({"detail": str(error)}, error.status, headers=NO_STORE)
         if user_id not in self.allowed and not await asyncio.to_thread(auth.registered_user, user_id):
@@ -126,9 +127,10 @@ class CloudAccess:
         return await self.login_response(response, user_id, ttl, previous_token)
 
     async def login_response(self, response: Response, user_id: str, ttl: int, previous_token: str,
-                             provider: str | None = None) -> Response:
+                             provider: str | None = None, *, revoke_existing: bool = False) -> Response:
         enrollment = provider if user_id not in self.allowed else None
-        token = await asyncio.to_thread(auth.start_session, user_id, ttl, registration_provider=enrollment)
+        token = await asyncio.to_thread(auth.start_session, user_id, ttl, registration_provider=enrollment,
+                                        revoke_existing=revoke_existing)
         await asyncio.to_thread(auth.end_session, previous_token)
         response.set_cookie(auth.COOKIE, token, max_age=ttl, **PRIVATE_COOKIE)
         return response
@@ -151,9 +153,14 @@ class CloudAccess:
         return JSONResponse({"detail": "找不到此入口。"}, 404, headers=NO_STORE)
 
     async def sms_send(self, request: Request) -> Response:
-        phone = registration.phone_number(await _field(request, "phone"))
+        data = await _json_body(request)
+        phone = registration.phone_number(data.get("phone"))
+        intent = data.get("intent")
+        if intent not in ("register", "reset"):
+            raise auth.LoginError(400, "请选择手机号注册或设置密码。")
         await asyncio.to_thread(registration.reserve_sms, phone)
         challenge, ttl = await registration.send_sms(self.env_id, phone)
+        challenge["intent"] = intent
         token = await asyncio.to_thread(registration.create_challenge, "sms", challenge, ttl)
         response = JSONResponse({"retry_after": registration.SMS_COOLDOWN}, headers=NO_STORE)
         response.set_cookie(registration.SMS_COOKIE, token, max_age=ttl, **PRIVATE_COOKIE)
@@ -165,16 +172,20 @@ class CloudAccess:
         if not isinstance(code, str) or not registration.CODE.fullmatch(code):
             raise auth.LoginError(400, "请输入 6 位短信验证码。")
         phone = registration.phone_number(data.get("phone"))
+        password = registration.new_password(data.get("password"))
         token = request.cookies.get(registration.SMS_COOKIE, "")
         challenge = await asyncio.to_thread(registration.sms_attempt, token)
         if auth.digest(phone) != challenge["phone_hash"]:
             raise auth.LoginError(400, "手机号已更换，请重新发送验证码。")
+        if challenge.get("intent") != data.get("intent") or challenge.get("intent") not in ("register", "reset"):
+            raise auth.LoginError(400, "操作已更换，请重新发送验证码。")
         verification_token = await registration.verify_sms(self.env_id, challenge, code)
         await asyncio.to_thread(registration.consume_challenge, token, "sms")
-        user_id, ttl = await registration.sms_identity(self.env_id, challenge, phone, verification_token)
+        user_id, ttl = await registration.sms_identity(self.env_id, challenge, phone, verification_token, password)
         response = Response(status_code=204, headers=NO_STORE)
         response.delete_cookie(registration.SMS_COOKIE, **PRIVATE_COOKIE)
-        return await self.login_response(response, user_id, ttl, previous_token, "sms")
+        return await self.login_response(response, user_id, ttl, previous_token, "sms",
+                                         revoke_existing=challenge["intent"] == "reset")
 
     async def wechat_start(self) -> Response:
         state, device = secrets.token_urlsafe(32), secrets.token_hex(16)
@@ -240,10 +251,6 @@ class CloudAccess:
             await self.app(scope, private_receive, private_send)
         except WebSocketDisconnect:
             return
-
-
-async def _field(request: Request, name: str) -> object:
-    return (await _json_body(request)).get(name)
 
 
 async def _json_body(request: Request) -> dict:

@@ -31,7 +31,8 @@ class CloudBaseError(Exception):
 
 
 async def cloudbase_request(env_id: str, path: str, *, data: dict | None = None,
-                            query: dict | None = None, device: str | None = None) -> dict:
+                            query: dict | None = None, device: str | None = None,
+                            allow_empty: bool = False) -> dict:
     url = f"https://{env_id}.api.tcloudbasegateway.com/auth/v1/{path}"
     headers = {"x-device-id": device} if device else None
     try:
@@ -48,6 +49,8 @@ async def cloudbase_request(env_id: str, path: str, *, data: dict | None = None,
         body = None
     if not response.is_success:
         raise CloudBaseError(response.status_code, body.get("error", "") if isinstance(body, dict) else "")
+    if allow_empty and response.content.strip() in (b"", b"null"):
+        return {}
     if not isinstance(body, dict):
         raise CloudBaseError(502)
     return body
@@ -89,7 +92,8 @@ def registered_user(user_id: str) -> bool:
                             (user_id,)).fetchone() is not None
 
 
-def start_session(user_id: str, ttl: int, *, registration_provider: str | None = None) -> str:
+def start_session(user_id: str, ttl: int, *, registration_provider: str | None = None,
+                  revoke_existing: bool = False) -> str:
     token = secrets.token_urlsafe(32)
     with connect() as conn, conn.transaction():
         if registration_provider:
@@ -99,6 +103,8 @@ def start_session(user_id: str, ttl: int, *, registration_provider: str | None =
                 (user_id, registration_provider),
             )
         conn.execute("DELETE FROM onto_research.web_sessions WHERE expires_at <= now()")
+        if revoke_existing:
+            conn.execute("DELETE FROM onto_research.web_sessions WHERE user_id = %s", (user_id,))
         conn.execute(
             """INSERT INTO onto_research.web_sessions (token_hash, user_id, expires_at)
                VALUES (%s, %s, now() + %s * interval '1 second')""",
