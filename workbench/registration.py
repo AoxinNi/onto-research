@@ -22,14 +22,29 @@ SMS_PER_MINUTE = 10
 SMS_PER_DAY = 100
 PHONE = re.compile(r"(?:\+86)?(1[0-9]{10})")
 CODE = re.compile(r"[0-9]{6}")
+PASSWORD_CLASSES = tuple(re.compile(pattern) for pattern in (r"[A-Z]", r"[a-z]", r"[0-9]", r"[^A-Za-z0-9]"))
 
 
-def phone_number(value: object) -> str:
+def normalized_phone(value: object) -> str | None:
     if isinstance(value, str) and len(value) <= 32:
         match = PHONE.fullmatch(re.sub(r"[ -]", "", value.strip()))
         if match:
             return f"+86 {match[1]}"
+    return None
+
+
+def phone_number(value: object) -> str:
+    phone = normalized_phone(value)
+    if phone:
+        return phone
     raise auth.LoginError(400, "请输入有效的中国大陆手机号。")
+
+
+def new_password(value: object) -> str:
+    if (isinstance(value, str) and re.fullmatch(r"[!-~]{8,32}", value)
+            and sum(bool(pattern.search(value)) for pattern in PASSWORD_CLASSES) >= 3):
+        return value
+    raise auth.LoginError(400, "密码需为 8–32 位，且包含大写字母、小写字母、数字、符号中的至少三类。")
 
 
 def reserve_sms(phone: str) -> None:
@@ -127,15 +142,28 @@ async def verify_sms(env_id: str, challenge: dict, code: str) -> str:
     return token
 
 
-async def sms_identity(env_id: str, challenge: dict, phone: str, verification_token: str) -> tuple[str, int]:
-    data = {"verification_token": verification_token}
-    path = "signin" if challenge["existing"] else "signup"
-    if path == "signup":
-        data["phone_number"] = phone
+async def sms_identity(env_id: str, challenge: dict, phone: str, verification_token: str,
+                       password: str) -> tuple[str, int]:
+    data = {"phone_number": phone, "verification_token": verification_token}
+    reset = challenge["intent"] == "reset"
+    if challenge["existing"] and not reset:
+        raise auth.LoginError(409, "该手机号已注册。请登录，或选择「设置或重设密码」。")
+    if reset and not challenge["existing"]:
+        raise auth.LoginError(409, "该手机号尚未注册，请选择「手机号注册」。")
     try:
-        result = await auth.cloudbase_request(env_id, path, device=challenge["device"], data=data)
-    except auth.CloudBaseError:
-        raise auth.LoginError(400, "手机号验证未完成，请重新发送验证码后再试。") from None
+        if reset:
+            # CloudBase's password recovery updates the identity bound to the verified phone.
+            await auth.cloudbase_request(env_id, "reset", device=challenge["device"],
+                                         data={**data, "new_password": password}, allow_empty=True)
+        else:
+            result = await auth.cloudbase_request(env_id, "signup", device=challenge["device"],
+                                                  data={**data, "password": password})
+    except auth.CloudBaseError as error:
+        if error.status >= 500:
+            raise auth.LoginError(503, "账号服务暂时不可用，请稍后重新发送验证码。") from None
+        raise auth.LoginError(400, "无法完成密码设置，请检查密码要求并重新发送验证码。") from None
+    if reset:
+        return await auth.cloudbase_sign_in(env_id, phone, password)
     return auth.verified_identity(result)
 
 

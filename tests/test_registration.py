@@ -16,6 +16,8 @@ SMS_USER = "sms-user"
 WECHAT_USER = "wechat-user"
 PHONE = "+86 13800000000"
 OTP = "123456"
+PASSWORD = "Workbench9!"
+NEW_PASSWORD = "Updated9!"
 
 
 @pytest.fixture
@@ -27,7 +29,8 @@ def setup(conn, monkeypatch):
     monkeypatch.setenv("WORKBENCH_REGISTRATION_PROVIDERS", "sms,wechat")
 
     calls = []
-    flags = {"phone_exists": False, "wechat_auto": False, "redirect_host": "open.weixin.qq.com"}
+    flags = {"phone_exists": False, "phone_password": None, "wechat_auto": False,
+             "redirect_host": "open.weixin.qq.com"}
     async_client = httpx.AsyncClient
 
     def reply(request):
@@ -37,7 +40,12 @@ def setup(conn, monkeypatch):
         device = request.headers.get("x-device-id")
         calls.append((path, data, device))
         if path == "signin" and "username" in data:
-            return httpx.Response(200, json={"sub": data["username"], "expires_in": 3600, "access_token": "opaque"})
+            user_id = data["username"]
+            if user_id == PHONE:
+                if data["password"] != flags["phone_password"]:
+                    return httpx.Response(401, json={"error": "invalid_password"})
+                user_id = SMS_USER
+            return httpx.Response(200, json={"sub": user_id, "expires_in": 3600, "access_token": "opaque"})
         assert device
         if path == "verification":
             assert data == {"target": "ANY", "phone_number": PHONE}
@@ -49,12 +57,17 @@ def setup(conn, monkeypatch):
             if data["verification_code"] != OTP:
                 return httpx.Response(400, json={"error": "invalid_verification_code"})
             return httpx.Response(200, json={"verification_token": "provider-sms-token"})
-        if path in ("signup", "signin"):
-            assert data["verification_token"] == "provider-sms-token"
-            if path == "signup":
-                assert data["phone_number"] == PHONE
-                flags["phone_exists"] = True
+        if path == "signup":
+            assert data == {"phone_number": PHONE, "verification_token": "provider-sms-token", "password": PASSWORD}
+            assert not flags["phone_exists"]
+            flags.update(phone_exists=True, phone_password=data["password"])
             return httpx.Response(200, json={"sub": SMS_USER, "expires_in": 3600, "access_token": "opaque"})
+        if path == "reset":
+            assert data == {"phone_number": PHONE, "verification_token": "provider-sms-token",
+                            "new_password": NEW_PASSWORD}
+            assert flags["phone_exists"]
+            flags["phone_password"] = data["new_password"]
+            return httpx.Response(204)
         if path == "provider/uri":
             callback = request.url.params["redirect_uri"]
             state = request.url.params["state"]
@@ -88,12 +101,14 @@ def browser(app):
     return TestClient(app, base_url=ORIGIN, headers={"origin": ORIGIN}, follow_redirects=False)
 
 
-def send_code(client):
-    return client.post("/auth/sms/send", json={"phone": PHONE})
+def send_code(client, intent="register"):
+    return client.post("/auth/sms/send", json={"phone": PHONE, "intent": intent})
 
 
 def complete_sms(client, code=OTP, **fields):
-    return client.post("/auth/sms/complete", json={"phone": PHONE, "code": code, **fields})
+    return client.post("/auth/sms/complete", json={
+        "phone": PHONE, "code": code, "intent": "register", "password": PASSWORD, **fields,
+    })
 
 
 def start_wechat(client):
@@ -117,7 +132,7 @@ def test_closed_registration_and_password_still_require_admission(setup, monkeyp
         assert client.get("/api/projects").json() == []
 
 
-def test_sms_registers_then_signs_in_to_same_private_workspace(setup, conn):
+def test_sms_registers_then_password_signs_in_to_same_private_workspace(setup, conn):
     calls, _ = setup
     app = cloud.create_app()
     with browser(app) as client, browser(app) as other:
@@ -130,6 +145,8 @@ def test_sms_registers_then_signs_in_to_same_private_workspace(setup, conn):
         assert send_code(client).status_code == 429
         assert complete_sms(other).status_code == 400
         assert complete_sms(client, phone="13900000001").status_code == 400
+        assert complete_sms(client, intent="reset").status_code == 400
+        assert complete_sms(client, password="short").status_code == 400
         assert complete_sms(client, "000000").status_code == 400
         assert complete_sms(client, user_id=INVITED).status_code == 204
         assert {device for path, _, device in calls if path != "signin"} == {calls[0][2]}
@@ -144,12 +161,37 @@ def test_sms_registers_then_signs_in_to_same_private_workspace(setup, conn):
         assert other.get(f"/api/graph?project={pid}").status_code == 404
 
         assert client.post("/auth/logout").status_code == 204
-        conn.execute("UPDATE onto_research.web_sms_requests SET sent_at = now() - interval '2 minutes'")
-        assert send_code(client).status_code == 200
-        assert complete_sms(client).status_code == 204
+        assert client.post("/auth/login", json={"username": "13800000000", "password": "wrong"}).status_code == 401
+        assert client.post("/auth/login", json={"username": "13800000000", "password": PASSWORD}).status_code == 204
+        assert calls[-1] == ("signin", {"username": PHONE, "password": PASSWORD}, None)
+        assert sum(path == "verification" for path, _, _ in calls) == 1
         assert [p["id"] for p in client.get("/api/projects").json()] == [pid]
         assert conn.execute("SELECT count(*) AS n FROM onto_research.web_registered_users WHERE user_id = %s",
                             (SMS_USER,)).fetchone()["n"] == 1
+
+
+def test_existing_sms_account_sets_password_without_changing_workspace(setup, conn):
+    calls, flags = setup
+    flags["phone_exists"] = True
+    app = cloud.create_app()
+    with browser(app) as existing, browser(app) as recovery:
+        existing.cookies.set(auth.COOKIE, auth.start_session(SMS_USER, 3600, registration_provider="sms"))
+        pid = existing.post("/api/projects", json={"name": "Existing private project"}).json()["id"]
+        assert send_code(recovery).status_code == 200
+        assert complete_sms(recovery).status_code == 409
+        assert recovery.get("/api/projects").status_code == 401
+        assert flags["phone_password"] is None
+        assert [path for path, _, _ in calls] == ["verification", "verification/verify"]
+
+        conn.execute("UPDATE onto_research.web_sms_requests SET sent_at = now() - interval '2 minutes'")
+        assert send_code(recovery, "reset").status_code == 200
+        assert complete_sms(recovery, intent="reset", password=NEW_PASSWORD).status_code == 204
+        assert [path for path, _, _ in calls[-4:]] == ["verification", "verification/verify", "reset", "signin"]
+        assert existing.get("/api/projects").status_code == 401
+        assert [p["id"] for p in recovery.get("/api/projects").json()] == [pid]
+        assert recovery.post("/auth/logout").status_code == 204
+        assert recovery.post("/auth/login", json={"username": "+8613800000000", "password": NEW_PASSWORD}).status_code == 204
+        assert [p["id"] for p in recovery.get("/api/projects").json()] == [pid]
 
 
 def test_sms_quota_and_wrong_code_cap(setup, conn):
@@ -164,7 +206,7 @@ def test_sms_quota_and_wrong_code_cap(setup, conn):
             """INSERT INTO onto_research.web_sms_requests (recipient_hash)
                SELECT i::text FROM generate_series(1, 10) AS i"""
         )
-        assert client.post("/auth/sms/send", json={"phone": "13900000001"}).status_code == 429
+        assert client.post("/auth/sms/send", json={"phone": "13900000001", "intent": "register"}).status_code == 429
         assert sum(path == "verification" for path, _, _ in calls) == 1
 
 

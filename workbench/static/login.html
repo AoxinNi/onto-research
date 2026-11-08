@@ -20,7 +20,7 @@
     </header>
     <form id="login-form" class="panel-card login-form" method="post" action="/auth/login">
       <label class="field">
-        <span>账号</span>
+        <span>手机号或用户名</span>
         <input name="username" autocomplete="username" maxlength="254" required>
       </label>
       <label class="field">
@@ -31,20 +31,26 @@
       <p id="login-error" class="test-result bad" role="alert" hidden></p>
     </form>
     <section id="register-panel" class="panel-card login-form" hidden>
-      <h2>注册或登录</h2>
-      <form id="sms-send" class="login-form" hidden>
+      <h2 id="register-title">注册</h2>
+      <form id="sms-form" class="login-form" method="post" action="/auth/sms/complete" hidden>
         <label class="field">
           <span>中国大陆手机号</span>
-          <input name="phone" type="tel" autocomplete="tel" maxlength="32" required>
+          <input name="phone" type="tel" autocomplete="username" maxlength="32" required>
         </label>
-        <button class="btn lg" type="submit">发送验证码</button>
-      </form>
-      <form id="sms-complete" class="login-form" hidden>
-        <label class="field">
-          <span>短信验证码</span>
-          <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
-        </label>
-        <button class="btn primary lg" type="submit">验证并继续</button>
+        <button class="btn lg" id="sms-send" type="button">发送验证码</button>
+        <div id="sms-complete" class="login-form" hidden>
+          <label class="field">
+            <span>短信验证码</span>
+            <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required disabled>
+          </label>
+          <label class="field">
+            <span>登录密码</span>
+            <input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="32" aria-describedby="password-hint" required disabled>
+          </label>
+          <p id="password-hint">8–32 位，大写字母、小写字母、数字、符号中至少包含三类。</p>
+          <button class="btn primary lg" type="submit" disabled>验证并注册</button>
+        </div>
+        <button class="btn lg" id="sms-mode" type="button">已有账号？设置或重设密码</button>
       </form>
       <button class="btn lg" id="wechat-start" type="button" hidden>微信扫码</button>
       <p id="register-message" class="test-result" aria-live="polite" hidden></p>
