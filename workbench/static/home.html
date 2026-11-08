@@ -168,9 +168,15 @@
   <dialog id="project-dialog">
     <form method="dialog" id="project-form">
       <h2 id="dialog-title">创建本体项目</h2>
-      <label class="field"><span>名称</span><input id="f-name" required maxlength="60" placeholder="例如 ETF 资金流研究" autocomplete="off"></label>
+      <label class="field"><span>名称</span><input id="f-name" required maxlength="60" placeholder="例如 青少年睡眠研究" autocomplete="off"></label>
       <label class="field"><span>描述</span><textarea id="f-desc" rows="3" maxlength="300" placeholder="这个本体关注什么、用来做什么（可选）"></textarea></label>
-      <p class="hint" id="dialog-hint">新项目自带种子类型（资产、叙事、事件、宏观指标……），节点和关系由 agent 帮你搭。</p>
+      <label class="field" id="f-pack-field"><span>类型</span>
+        <select id="f-pack">
+          <option value="research" selected>研究：问题、假设、论断、观测、概念、方法</option>
+          <option value="market">市场监测：资产、叙事、事件、宏观指标、信号</option>
+        </select>
+      </label>
+      <p class="hint" id="dialog-hint">新项目自带所选类型，节点和关系由 agent 帮你搭。以后也可以在项目菜单里加入研究类型。</p>
       <div class="dialog-actions">
         <button type="button" class="btn" value="cancel" id="dialog-cancel">取消</button>
         <button type="submit" class="btn primary" id="dialog-ok">创建</button>

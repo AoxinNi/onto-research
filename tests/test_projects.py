@@ -13,7 +13,7 @@ from workbench.agent import WorkbenchAgent
 
 @pytest.fixture
 def conn(conn):
-    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT)
+    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT, pack="market")
     return conn
 
 
@@ -22,7 +22,7 @@ def in_project(pid):
 
 
 def test_projects_are_isolated_and_summarised(conn):
-    p = projects.create(conn, "Macro Lab 宏观", "测试用")
+    p = projects.create(conn, "Macro Lab 宏观", "测试用", pack="market")
     assert p["id"].startswith("macro-lab") and p["schema_name"].startswith(projects.PROJECT_SCHEMA_PREFIX)
     s = in_project(p["id"])
     assert s.registry.object_types  # seeded
@@ -46,7 +46,7 @@ def test_projects_are_isolated_and_summarised(conn):
 
 
 def test_export_import_round_trip_and_atomic_failure(conn):
-    p = projects.create(conn, "源", None)
+    p = projects.create(conn, "源", None, pack="market")
     s, human = in_project(p["id"]), None
     a = s.upsert_node("Asset", "比特币", {"kind": "user"}, "x", aliases=["BTC"], props={"symbol": "BTC", "asset_class": "spot"})["node"]
     b = s.upsert_node("MacroIndicator", "联邦基金利率", {"kind": "llm_prior"}, "x")["node"]
@@ -121,7 +121,7 @@ def test_pages_and_project_api(client):
 
 
 def test_chat_writes_into_the_pages_project(client):
-    pid = client.post("/api/projects", json={"name": "沙盒"}).json()["id"]
+    pid = client.post("/api/projects", json={"name": "沙盒", "pack": "market"}).json()["id"]
     with client.websocket_connect(f"/ws?project={pid}") as ws:
         first = ws.receive_json()
         assert first["project"]["id"] == pid and first["graph"]["nodes"] == []
@@ -325,7 +325,7 @@ def test_mcp_client_switches_projects_but_the_workbench_cannot(conn, monkeypatch
     monkeypatch.setattr(mcp_server, "_stores", {})
     monkeypatch.setattr(mcp_server, "_selected", None)
     monkeypatch.delenv("ONTOLOGY_PROJECT", raising=False)
-    p = projects.create(conn, "半导体")
+    p = projects.create(conn, "半导体", pack="market")
     listed = mcp_server.list_projects()
     assert listed["current"] == projects.DEFAULT and p["id"] in {x["id"] for x in listed["projects"]}
 

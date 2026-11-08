@@ -38,7 +38,7 @@ SYSTEM = mcp_server.INSTRUCTIONS + """
 You are working inside the ontology workbench: the user sees the graph on a canvas next to this chat, and every
 write you make appears there immediately as a pending (ghost) element until they accept the changeset.
 - Answer in the user's language. Node names follow the user's language too; put the other language in aliases
-  (e.g. name "比特币" with aliases ["BTC", "Bitcoin"]).
+  (e.g. name "睡眠质量" with aliases ["sleep quality"], or "比特币" with ["BTC", "Bitcoin"]).
 - Prefer a readable graph over an exhaustive one: for a "build a graph around X" request, 20-60 nodes, each linked
   to something, is usually right. Ask before going much bigger.
 - Work in batches: search for what already exists, then create nodes, then links. Parallel tool calls are fine.

@@ -1,6 +1,6 @@
 /* 本体工作台：三维星图 + 对话 + 审核。图数据来自服务端快照，前端只做增量合并、布局和视觉状态。 */
 import { ForceGraph3D, THREE, CSS2DRenderer, CSS2DObject, UnrealBloomPass } from "/static/vendor/graph3d.js";
-import { TYPES, LINKS, PROVENANCE, typeOf } from "/static/vocab.js";
+import { TYPES, LINKS, LAYERS, PROVENANCE, lowerLayer, typeOf } from "/static/vocab.js";
 import { currentProject, go, request, routes, socket } from "/static/net.js";
 
 // Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
@@ -244,11 +244,11 @@ G.postProcessingComposer().addPass(bloom);
 
 G.d3Force("charge").strength((n) => -120 - 40 * Math.sqrt(n.__deg || 0)).distanceMax(700);
 G.d3Force("link").distance((l) => 52 + 9 * Math.sqrt((nodes.get(srcId(l))?.__deg || 1) + (nodes.get(dstId(l))?.__deg || 1)));
-// World layer floats above, the company's own layer settles below it.
+// What is studied floats above; the company's own layer, or the reasoning about the subject, settles below.
 let forceNodes = [];
 const layerForce = Object.assign((alpha) => {
   for (const n of forceNodes) {
-    n.vy += ((n.layer === "company" ? -80 : 18) - n.y) * alpha * 0.05;
+    n.vy += ((lowerLayer(n.layer) ? -80 : 18) - n.y) * alpha * 0.05;
     // Gentle gravity keeps unlinked nodes from drifting off to the edge of the charge range.
     const g = (n.__deg ? 0.012 : 0.05) * alpha;
     n.vx -= n.x * g;
@@ -288,9 +288,9 @@ function visual(n) {
   if (n.__v) return n.__v;
   const group = new THREE.Group();
   const coreMat = orbMaterial();
-  // The company's own layer reads as wireframe crystals; the market world as solid orbs.
+  // The lower layer (company, reasoning) reads as wireframe crystals; the upper one as solid orbs.
   let core = new THREE.Mesh(sphereGeo, coreMat);
-  if (n.layer === "company") {
+  if (lowerLayer(n.layer)) {
     const heart = core;
     heart.scale.setScalar(0.42);
     core = new THREE.Group().add(
@@ -322,7 +322,7 @@ function styleNode(n) {
   v.core.traverse((o) => { if (o.material && o.material !== v.coreMat) o.material.color.copy(color); });
   v.core.scale.setScalar(r);
   v.halo.material.color.copy(color);
-  v.halo.scale.setScalar(r * (n.layer === "company" ? 4.5 : 5.5));
+  v.halo.scale.setScalar(r * (lowerLayer(n.layer) ? 4.5 : 5.5));
   v.label.position.set(0, -r * 1.05, 0);
   v.el.style.setProperty("--c", t.color);
   v.el.querySelector(".n").textContent = n.name;
@@ -665,7 +665,7 @@ function renderLegend() {
   const present = [...counts.keys()].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   legend.replaceChildren(...present.map((type) => {
     const t = typeOf(type);
-    const company = graph.nodes.find((n) => n.type === type)?.layer === "company";
+    const company = lowerLayer(graph.nodes.find((n) => n.type === type)?.layer);
     return el("button", {
       type: "button", class: "chip", style: `--c:${t.color}`, "aria-pressed": String(typeFilter.has(type)),
       onclick: () => { typeFilter.has(type) ? typeFilter.delete(type) : typeFilter.add(type); renderLegend(); refreshFocus(); },
@@ -853,7 +853,7 @@ function renderNode(box, n) {
   box.append(el("h2", {}, n.name));
   if (n.aliases?.length) box.append(el("div", { class: "aliases" }, n.aliases.join(" / ")));
   box.append(el("div", { class: "badges" },
-    el("span", { class: "badge" }, n.layer === "company" ? "公司层" : "世界层"),
+    el("span", { class: "badge" }, LAYERS[n.layer] || n.layer || "—"),
     n.pending && el("span", { class: "badge warn" }, "待审核"),
     el("span", { class: "badge" }, provenanceText(n.provenance)),
   ));
@@ -863,7 +863,7 @@ function renderNode(box, n) {
     box.append(el("h3", {}, el("span", {}, "数据"), el("span", {}, String(data.length))));
     for (const d of data) box.append(dataCard(d));
   }
-  box.append(newsSection(n.id));
+  if (projectPacks.includes("market")) box.append(newsSection(n.id));
   const props = Object.entries(n.props || {});
   if (props.length) {
     box.append(el("h3", {}, "属性"));
@@ -1572,8 +1572,10 @@ const input = $("#input");
 function syncSend() { $("#send").disabled = busy || !input.value.trim(); if (busy) $("#send").disabled = false; }
 function autosize() { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
 
+let projectPacks = [];       // the project's type packs; the news desk only serves market projects
 function showProject(p) {
   if (!p) return;
+  projectPacks = p.packs || [];
   $("#project-name").textContent = p.name;
   document.title = `${p.name} · 本体工作台`;
 }

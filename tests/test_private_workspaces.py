@@ -78,7 +78,7 @@ def test_two_users_have_independent_projects_and_chat(cloud_app, conn, monkeypat
     ):
         assert login(owner).status_code == login(other, OTHER).status_code == 204
         assert owner.get("/api/projects").json() == []
-        response = owner.post("/api/projects", json={"name": "Owner research", "owner_user_id": OTHER})
+        response = owner.post("/api/projects", json={"name": "Owner research", "owner_user_id": OTHER, "pack": "market"})
         assert response.status_code == 200
         pid = response.json()["id"]
         assert projects.get(conn, pid)["owner_user_id"] == OWNER

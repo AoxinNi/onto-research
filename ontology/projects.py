@@ -26,6 +26,7 @@ from psycopg.conninfo import make_conninfo
 
 from .db import connect, migrate
 from .errors import OntologyError
+from .registry import DEFAULT_PACK, LEGACY_PACK, PACKS, load_seed
 from .store import OntologyStore
 
 DEFAULT = "research"
@@ -167,11 +168,14 @@ def _slug(name: str) -> str:
     return f"{ascii_part or 'p'}-{uuid.uuid4().hex[:6]}" if ascii_part else f"p-{uuid.uuid4().hex[:8]}"
 
 
-def create(conn: psycopg.Connection, name: str, description: str | None = None, project_id: str | None = None) -> dict[str, Any]:
-    """A new, empty project with the seed types."""
+def create(conn: psycopg.Connection, name: str, description: str | None = None, project_id: str | None = None,
+           pack: str = DEFAULT_PACK) -> dict[str, Any]:
+    """A new, empty project with the seed types of a type pack."""
     ensure_registry(conn)
     if not name.strip():
         raise OntologyError("project name is empty")
+    if pack not in PACKS:
+        raise OntologyError(f"unknown type pack '{pack}'; known: {sorted(PACKS)}")
     pid = project_id or _slug(name)
     if not ID.match(pid):
         raise OntologyError("project id must be lowercase letters, digits, - or _, starting with a letter")
@@ -181,12 +185,13 @@ def create(conn: psycopg.Connection, name: str, description: str | None = None, 
     with conn.transaction():
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
         conn.execute(
-            "INSERT INTO onto_research.projects (id, name, description, schema_name, owner_user_id) VALUES (%s, %s, %s, %s, %s)",
-            (pid, name.strip(), (description or "").strip() or None, schema, workspace_owner.get() or None),
+            """INSERT INTO onto_research.projects (id, name, description, schema_name, owner_user_id, packs)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (pid, name.strip(), (description or "").strip() or None, schema, workspace_owner.get() or None, [pack]),
         )
         conn.execute(sql.SQL("SET LOCAL search_path TO {}").format(sql.Identifier(schema)))
         migrate(conn)
-        OntologyStore(conn, actor="human").sync_seed_types()
+        OntologyStore(conn, actor="human").sync_seed_types([pack])
     return summary(conn, get(conn, pid))
 
 
@@ -222,6 +227,26 @@ def claim_legacy(conn: psycopg.Connection, project_id: str, user_id: str) -> Non
     ).fetchone()
     if row is None and get(conn, project_id)["owner_user_id"] != user_id:
         raise OntologyError("project already belongs to another user")
+
+
+def add_pack(conn: psycopg.Connection, project_id: str, pack: str) -> dict[str, Any]:
+    """Add a type pack's types to an existing project. Types both packs name are merged, so nothing that was
+    valid becomes invalid. Returns what changed in the registry."""
+    p = get(conn, project_id)
+    if pack not in PACKS:
+        raise OntologyError(f"unknown type pack '{pack}'; known: {sorted(PACKS)}")
+    if pack in p["packs"]:
+        raise OntologyError(f"project already uses the {PACKS[pack]} types")
+    packs = [*p["packs"], pack]
+    with project_connect(project_id, _url(conn)) as pc:
+        s = OntologyStore(pc, actor="human")
+        before = {(t.kind, t.name) for t in [*s.registry.object_types.values(), *s.registry.link_types.values()]}
+        s.sync_seed_types(packs)
+        after = {(t.kind, t.name) for t in [*s.registry.object_types.values(), *s.registry.link_types.values()]}
+    conn.execute(f"UPDATE onto_research.projects SET packs = %s, updated_at = now() WHERE id = %s AND {OWNER_FILTER}",
+                 (packs, project_id, *_owner_params()))
+    return {"packs": packs, "added": sorted(f"{k}:{n}" for k, n in after - before),
+            "merged": sorted(f"{k}:{n}" for k, n in before & {(t.kind, t.name) for t in load_seed(pack)})}
 
 
 def summary(conn: psycopg.Connection, p: dict[str, Any]) -> dict[str, Any]:
@@ -292,7 +317,7 @@ def export(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
     return {
         "format": FORMAT,
         "exported_at": datetime.now(UTC).isoformat(),
-        "project": {"name": p["name"], "description": p["description"]},
+        "project": {"name": p["name"], "description": p["description"], "packs": p["packs"]},
         "types": types,
         "nodes": [{"ref": n["id"], **{k: n[k] for k in ("type", "key", "name", "aliases", "description", "props", "provenance")}}
                   for n in nodes],
@@ -308,7 +333,7 @@ def template() -> dict[str, Any]:
     """An empty, valid research project import file."""
     return {
         "format": FORMAT,
-        "project": {"name": "示例研究项目", "description": "填写研究主题、节点和关系"},
+        "project": {"name": "示例研究项目", "description": "填写研究主题、节点和关系", "packs": [DEFAULT_PACK]},
         "types": [],
         "nodes": [],
         "links": [],
@@ -321,8 +346,13 @@ def import_doc(conn: psycopg.Connection, doc: dict[str, Any], name: str | None =
     if not isinstance(doc, dict) or doc.get("format") not in {FORMAT, *OLD_FORMATS}:
         raise OntologyError(f"not a {FORMAT} file (download the import template to see the format)")
     meta = doc.get("project") or {}
-    p = create(conn, name or meta.get("name") or "导入的本体", meta.get("description"))
+    packs = meta.get("packs") or [LEGACY_PACK]  # files exported before packs existed hold market-type nodes
+    if not isinstance(packs, list) or not packs or any(k not in PACKS for k in packs):
+        raise OntologyError(f"project.packs must list known type packs: {sorted(PACKS)}")
+    p = create(conn, name or meta.get("name") or "导入的本体", meta.get("description"), pack=packs[0])
     try:
+        for extra in dict.fromkeys(packs[1:]):
+            add_pack(conn, p["id"], extra)
         with project_connect(p["id"], _url(conn)) as pc:
             human = OntologyStore(pc, actor="human")
             importer = OntologyStore(pc, actor="import")

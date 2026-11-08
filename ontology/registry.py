@@ -12,7 +12,11 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .errors import OntologyError
 
-SEED_PATH = Path(__file__).parent / "schema" / "types.yaml"
+PACKS_DIR = Path(__file__).parent / "schema" / "packs"
+# Type packs a project can be seeded with. A project records the packs it uses; their types are merged.
+PACKS = {"research": "研究", "market": "市场监测"}
+DEFAULT_PACK = "research"
+LEGACY_PACK = "market"  # projects created before packs existed were seeded with the market types
 
 PropType = Literal["string", "text", "number", "integer", "boolean", "datetime", "enum", "string_list"]
 
@@ -95,7 +99,7 @@ class _TypeBase(BaseModel):
 
 class ObjectType(_TypeBase):
     kind: Literal["object"] = "object"
-    layer: Literal["world", "company"]
+    layer: Literal["world", "company", "subject", "reasoning"]
 
 
 class LinkType(_TypeBase):
@@ -166,7 +170,23 @@ def parse_type(kind: str, name: str, spec: dict[str, Any]) -> ObjectType | LinkT
     raise OntologyError(f"kind must be 'object' or 'link', got {kind!r}")
 
 
-def load_seed(path: Path = SEED_PATH) -> list[ObjectType | LinkType]:
+def pack_path(pack: str) -> Path:
+    if pack not in PACKS:
+        raise OntologyError(f"unknown type pack '{pack}'; known: {sorted(PACKS)}")
+    return PACKS_DIR / f"{pack}.yaml"
+
+
+def pack_guidance(packs: list[str]) -> str:
+    """What the agent should know about working with these packs' types (their `guidance` text)."""
+    parts = []
+    for pack in packs:
+        raw = yaml.safe_load(pack_path(pack).read_text(encoding="utf-8"))
+        if raw.get("guidance"):
+            parts.append(str(raw["guidance"]).strip())
+    return "\n\n".join(parts)
+
+
+def _load_file(path: Path) -> list[ObjectType | LinkType]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     types: list[ObjectType | LinkType] = []
     for name, spec in (raw.get("object_types") or {}).items():
@@ -174,6 +194,40 @@ def load_seed(path: Path = SEED_PATH) -> list[ObjectType | LinkType]:
     for name, spec in (raw.get("link_types") or {}).items():
         types.append(parse_type("link", name, spec))
     return types
+
+
+def merge_types(a: ObjectType | LinkType, b: ObjectType | LinkType) -> ObjectType | LinkType:
+    """One type that accepts everything either definition accepts, so nodes valid under one stay valid.
+
+    Properties and enum values are united; a property is required only if both require it. Where the two
+    disagree on a property's type, or on layer and description, the first definition wins."""
+    if a.kind != b.kind or a.name != b.name:
+        raise OntologyError(f"cannot merge {a.kind} {a.name} with {b.kind} {b.name}")
+    props: dict[str, PropertySpec] = {}
+    for key in dict.fromkeys([*a.properties, *b.properties]):
+        pa, pb = a.properties.get(key), b.properties.get(key)
+        if pa is None or pb is None:
+            props[key] = (pa or pb).model_copy(update={"required": False})
+        elif pa.type != pb.type:
+            props[key] = pa.model_copy(update={"required": pa.required and pb.required})
+        else:
+            values = list(dict.fromkeys([*(pa.values or []), *(pb.values or [])])) or None
+            props[key] = pa.model_copy(update={"required": pa.required and pb.required, "values": values})
+    update: dict[str, Any] = {"properties": props}
+    if isinstance(a, LinkType) and isinstance(b, LinkType):
+        ends = lambda x, y: ["*"] if "*" in x + y else list(dict.fromkeys(x + y))  # noqa: E731
+        update |= {"from_types": ends(a.from_types, b.from_types), "to_types": ends(a.to_types, b.to_types)}
+    return a.model_copy(update=update)
+
+
+def load_seed(packs: list[str] | str = DEFAULT_PACK) -> list[ObjectType | LinkType]:
+    """The seed types of one or more packs; a type named by several packs is merged (see merge_types)."""
+    merged: dict[tuple[str, str], ObjectType | LinkType] = {}
+    for pack in [packs] if isinstance(packs, str) else packs:
+        for t in _load_file(pack_path(pack)):
+            k = (t.kind, t.name)
+            merged[k] = merge_types(merged[k], t) if k in merged else t
+    return list(merged.values())
 
 
 def build_registry(types: list[ObjectType | LinkType]) -> Registry:

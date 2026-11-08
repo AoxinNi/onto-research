@@ -1,0 +1,143 @@
+# 类型包「研究」：新项目的默认类型。区分研究对象与推理过程，适合文献研究和论文写作。
+# 这里是"人设计的 schema"：agent 只能通过 propose_type 提议新类型，由人确认后生效。
+# layer: subject = 研究对象（概念、方法、主体、事件）；reasoning = 推理（问题、假设、论断、观测）。
+# 属性类型: string | text | number | integer | boolean | datetime | enum | string_list
+# 关系的 from / to 列出允许的对象类型，"*" 表示任意类型。
+# 文献对节点的支持不用这里的 supports / contradicts，而是记为文献库中的「依据」；这里的关系只表示节点之间的推理。
+
+guidance: |
+  This is a research project. The upper layer (Concept, Method, Entity, Event) is what is studied; the lower layer
+  (Question, Hypothesis, Claim, Observation) is the reasoning about it.
+  - Keep them apart: a Hypothesis is something to be tested; an Observation is a finding with its measure, sample
+    and setting; a Claim is an assertion, origin=literature when a source makes it, origin=project when it is the
+    project's own conclusion.
+  - Tie the reasoning together: hypotheses and claims address a Question; observations support, contradict or
+    qualify hypotheses and claims; every reasoning node is about at least one Concept, Entity, Event or Method.
+  - Model causal structure between concepts with influences, stating direction and, when known, the mechanism.
+  - Your own background knowledge is provenance llm_prior; never present it as a literature finding or invent
+    authors, years or numbers for it.
+
+object_types:
+  Question:
+    layer: reasoning
+    description: 研究问题，如 社交媒体使用是否影响青少年睡眠；可以拆成子问题
+    properties:
+      status: {type: enum, values: [open, partially_answered, answered, dropped]}
+      priority: {type: integer}
+
+  Hypothesis:
+    layer: reasoning
+    description: 待检验的假设，写成可以被证据支持或反驳的一句话
+    properties:
+      status: {type: enum, values: [proposed, testing, supported, refuted, abandoned]}
+      confidence: {type: number}
+
+  Claim:
+    layer: reasoning
+    description: 断言，文献提出的观点（origin=literature），或本项目得出的结论（origin=project）
+    properties:
+      origin: {type: enum, values: [literature, project], required: true}
+      claim_kind: {type: enum, values: [empirical, theoretical, methodological, normative]}
+
+  Observation:
+    layer: reasoning
+    description: 实证发现或观测结果，如 某样本中两变量相关 r=0.32；记下测量、样本和条件
+    properties:
+      measure: {type: string}
+      result: {type: text}
+      sample: {type: string}
+      setting: {type: string}
+      observed_at: {type: datetime}
+
+  Concept:
+    layer: subject
+    description: 概念、构念、变量或理论，如 自我效能感、睡眠质量、社会资本理论
+    properties:
+      category: {type: enum, values: [construct, variable, theory, phenomenon, other]}
+
+  Method:
+    layer: subject
+    description: 研究设计、技术、量表、数据集或软件，如 随机对照试验、PSQI 量表、CFPS 数据
+    properties:
+      category: {type: enum, values: [design, technique, instrument, dataset, software, analysis]}
+
+  Entity:
+    layer: subject
+    description: 研究涉及的人、机构、地区、物种或实物
+    properties:
+      kind: {type: enum, values: [person, organization, place, organism, artifact, other], required: true}
+
+  Event:
+    layer: subject
+    description: 与研究相关的事件，如 政策出台、实验干预、自然灾害
+    properties:
+      occurred_at: {type: datetime}
+      category: {type: string}
+
+link_types:
+  addresses:
+    description: 假设、论断或观测回应某个研究问题
+    from: [Hypothesis, Claim, Observation]
+    to: [Question]
+
+  supports:
+    description: 观测或论断支持假设或另一个论断（节点之间的推理，不是文献依据）
+    from: [Observation, Claim]
+    to: [Hypothesis, Claim]
+    properties:
+      strength: {type: number}
+
+  contradicts:
+    description: 观测或论断与假设或另一个论断相矛盾
+    from: [Observation, Claim]
+    to: [Hypothesis, Claim]
+    properties:
+      strength: {type: number}
+
+  qualifies:
+    description: 观测或论断限定了假设或论断的适用范围或条件
+    from: [Observation, Claim]
+    to: [Hypothesis, Claim]
+
+  derives_from:
+    description: 论断或假设推论自其他论断、观测或假设
+    from: [Claim, Hypothesis]
+    to: [Claim, Observation, Hypothesis]
+
+  refines:
+    description: 细化：更具体的假设，或研究问题的子问题
+    from: [Hypothesis, Question]
+    to: [Hypothesis, Question]
+
+  about:
+    description: 问题、假设、论断或观测涉及的研究对象
+    from: [Question, Hypothesis, Claim, Observation]
+    to: [Concept, Entity, Event, Method]
+
+  influences:
+    description: 一个概念或变量影响另一个，是因果模型的边；写明方向和机制
+    from: [Concept]
+    to: [Concept]
+    properties:
+      direction: {type: enum, values: [positive, negative, mixed, unknown]}
+      mechanism: {type: text}
+
+  part_of:
+    description: 概念从属于更大的概念，或主体从属于更大的主体
+    from: [Concept, Entity]
+    to: [Concept, Entity]
+
+  measures:
+    description: 方法或量表测量某个概念（操作化）
+    from: [Method]
+    to: [Concept]
+
+  uses_method:
+    description: 观测由某种方法得到，或假设用某种方法检验
+    from: [Observation, Hypothesis]
+    to: [Method]
+
+  involves:
+    description: 事件涉及的主体或概念
+    from: [Event]
+    to: [Entity, Concept]

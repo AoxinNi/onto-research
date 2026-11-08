@@ -10,7 +10,7 @@ from workbench.agent import WorkbenchAgent, describe_call
 
 @pytest.fixture
 def client(conn, monkeypatch):
-    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT)
+    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT, pack="market")
     monkeypatch.setenv("DATABASE_URL", TEST_URL)
     monkeypatch.setattr(mcp_server, "_store", None)
     monkeypatch.setattr(mcp_server, "_stores", {})

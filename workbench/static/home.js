@@ -188,6 +188,8 @@ function toggleMenu(p, btn) {
   const menu = el("div", { class: "menu", role: "menu", onclick: (e) => e.stopPropagation() },
     el("button", { type: "button", role: "menuitem", onclick: act(() => openDialog(p)) }, "编辑名称和描述"),
     el("button", { type: "button", role: "menuitem", onclick: act(() => exportProject(p)) }, "导出 JSON"),
+    p.status === "active" && !(p.packs || []).includes("research") &&
+      el("button", { type: "button", role: "menuitem", onclick: act(() => addResearchTypes(p)) }, "加入研究类型"),
     !cloudWorkspace && el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
     el("button", { type: "button", role: "menuitem", class: p.status === "active" ? "danger" : "",
       onclick: act(() => setStatus(p, p.status === "active" ? "archived" : "active")) }, p.status === "active" ? "归档" : "恢复"),
@@ -201,6 +203,15 @@ async function exportProject(p) {
   try {
     if (await download(`/api/projects/${encodeURIComponent(p.id)}/export`, `${p.id}.json`)) toast("已导出");
   } catch (e) { toast(e?.message || String(e), true); }
+}
+
+async function addResearchTypes(p) {
+  if (!await confirmAction(`给「${p.name}」加入研究类型（问题、假设、论断、观测、方法）？已有的节点和类型保留，同名类型会合并。`)) return;
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(p.id)}/packs/research`, { method: "POST" });
+    toast(`已加入 ${r.added.length} 个类型`);
+    loadProjects();
+  } catch (e) { toast(e.message, true); }
 }
 
 async function setStatus(p, status) {
@@ -221,6 +232,8 @@ function openDialog(p = null) {
   $("#dialog-title").textContent = p ? "编辑本体项目" : "创建本体项目";
   $("#dialog-ok").textContent = p ? "保存" : "创建";
   $("#dialog-hint").hidden = !!p;
+  $("#f-pack-field").hidden = !!p;
+  $("#f-pack").value = "research";
   $("#f-name").value = p?.name || "";
   $("#f-desc").value = p?.description || "";
   dialog.showModal();
@@ -230,7 +243,8 @@ $("#create-btn").addEventListener("click", () => openDialog());
 $("#dialog-cancel").addEventListener("click", () => dialog.close());
 $("#project-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = JSON.stringify({ name: $("#f-name").value.trim(), description: $("#f-desc").value.trim() });
+  const fields = { name: $("#f-name").value.trim(), description: $("#f-desc").value.trim() };
+  const body = JSON.stringify(editing ? fields : { ...fields, pack: $("#f-pack").value });
   $("#dialog-ok").disabled = true;
   try {
     if (editing) {

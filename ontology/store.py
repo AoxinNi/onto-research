@@ -19,7 +19,8 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ValidationError, model_validator
 
 from .errors import OntologyError
-from .registry import LinkType, ObjectType, Registry, build_registry, load_seed, parse_type
+from .registry import (LEGACY_PACK, LinkType, ObjectType, Registry, build_registry, load_seed, pack_guidance,
+                       parse_type)
 from .evidence import summaries
 from .providers import PROVIDERS
 from .series import SeriesStore, load_templates
@@ -95,10 +96,22 @@ class OntologyStore:
 
     # ------------------------------------------------------------------ types
 
-    def sync_seed_types(self) -> None:
-        """Make the seed YAML the accepted definition of every type it names."""
+    def project_packs(self) -> list[str]:
+        """The type packs of the project this connection points at (its search_path schema). A schema outside
+        the project registry (the CLI's legacy single database, tests) counts as a market project."""
+        has_column = self.conn.execute(
+            """SELECT 1 FROM information_schema.columns WHERE table_schema = 'onto_research'
+               AND table_name = 'projects' AND column_name = 'packs'"""
+        ).fetchone()
+        row = has_column and self.conn.execute(
+            "SELECT packs FROM onto_research.projects WHERE schema_name = current_schema()"
+        ).fetchone()
+        return list(row["packs"] if row else []) or [LEGACY_PACK]
+
+    def sync_seed_types(self, packs: list[str] | None = None) -> None:
+        """Make the seed YAML of the project's type packs the accepted definition of every type they name."""
         with self.conn.transaction():
-            for t in load_seed():
+            for t in load_seed(packs or self.project_packs()):
                 self.conn.execute(
                     """INSERT INTO types (kind, name, spec, status, source)
                        VALUES (%s, %s, %s, 'accepted', 'seed')
@@ -114,6 +127,8 @@ class OntologyStore:
 
     def get_schema(self) -> dict[str, Any]:
         out = self.registry.describe()
+        out["packs"] = self.project_packs()
+        out["guidance"] = pack_guidance(out["packs"])
         out["proposed_types"] = self.conn.execute(
             "SELECT kind, name, spec, justification, proposed_by FROM types WHERE status = 'proposed' ORDER BY created_at"
         ).fetchall()

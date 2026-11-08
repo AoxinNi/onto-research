@@ -32,6 +32,7 @@ from ontology import providers as providers_mod
 from ontology import sources as sources_mod
 from ontology.db import connect
 from ontology.errors import OntologyError
+from ontology.registry import DEFAULT_PACK, PACKS
 from ontology.store import OntologyStore
 
 from . import agent as agent_mod
@@ -205,7 +206,7 @@ def snapshot(project: str = projects.DEFAULT) -> dict[str, Any]:
         meta = projects.get(s.conn, project)
         return {
             "type": "graph",
-            "project": {"id": meta["id"], "name": meta["name"], "description": meta["description"]},
+            "project": {"id": meta["id"], "name": meta["name"], "description": meta["description"], "packs": meta["packs"]},
             "graph": s.graph(),
             "review": [c for c in s.list_changesets(limit=50) if c["status"] in ("open", "pending") and c["operations"]],
             "proposed_types": s.get_schema()["proposed_types"],
@@ -273,6 +274,7 @@ class ProjectIn(BaseModel):
     name: str | None = None
     description: str | None = None
     status: str | None = None
+    pack: str | None = None  # type pack for a new project (registry.PACKS); ignored when editing
 
 
 @app.get("/auth/options")
@@ -288,7 +290,24 @@ def list_projects() -> list[dict[str, Any]]:
 
 @app.post("/api/projects")
 def create_project(body: ProjectIn) -> dict[str, Any]:
-    return _registry(lambda c: projects.create(c, body.name or "", body.description))
+    return _registry(lambda c: projects.create(c, body.name or "", body.description, pack=body.pack or DEFAULT_PACK))
+
+
+@app.get("/api/packs")
+def list_packs() -> list[dict[str, Any]]:
+    return [{"id": k, "label": v, "default": k == DEFAULT_PACK} for k, v in PACKS.items()]
+
+
+@app.post("/api/projects/{project}/packs/{pack}")
+async def add_project_pack(project: str, pack: str) -> dict[str, Any]:
+    """Add a type pack's types to an existing project (merging the types both packs name)."""
+    result = _registry(lambda c: projects.add_pack(c, project, pack))
+    agent_store = mcp_server._store or mcp_server._stores.get(project)
+    if agent_store is not None:
+        agent_store.registry = agent_store.load_registry()
+    record_history(project, f"加入类型包「{PACKS[pack]}」")
+    await broadcast(project, snapshot(project))
+    return result
 
 
 @app.patch("/api/projects/{project}")
@@ -555,7 +574,7 @@ def get_graph(project: str = Project, at: str | None = None) -> dict[str, Any]:
         except OntologyError as e:
             raise HTTPException(status_code=404, detail=str(e)) from None
         meta = projects.get(s.conn, project)
-    return {"type": "graph", "project": {"id": meta["id"], "name": meta["name"], "description": meta["description"]},
+    return {"type": "graph", "project": {"id": meta["id"], "name": meta["name"], "description": meta["description"], "packs": meta["packs"]},
             "graph": past["graph"], "commit": past["commit"], "review": [], "proposed_types": []}
 
 

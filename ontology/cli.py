@@ -11,6 +11,7 @@
     python -m ontology.cli import-csv <node_id> <file.csv> --name "ETF 净流入" [--role value] [--unit USD] [--frequency 1d]
     python -m ontology.cli projects                    # every ontology project
     python -m ontology.cli project-export <id> [file]  # portable JSON; project-import <file> [--name ...] to load one
+    python -m ontology.cli project-add-pack <id> research   # add a type pack's types to an existing project
 
 Pass --project <id> for commands that operate on an existing project.
 """
@@ -27,6 +28,7 @@ from .db import connect, migrate
 from .providers import load_env_file
 from .errors import OntologyError
 from . import projects
+from .registry import PACKS
 from .sources import Obs
 from .store import OntologyStore
 
@@ -50,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
     claim.add_argument("project_id")
     claim.add_argument("user_id")
     sub.add_parser("migrate", help="apply pending migrations to the registry and every project")
+    addp = sub.add_parser("project-add-pack", help="add a type pack's types to an existing project")
+    addp.add_argument("project_id")
+    addp.add_argument("pack", choices=sorted(PACKS))
     sub.add_parser("init", help="apply migrations and load the seed types")
     ls = sub.add_parser("changesets")
     ls.add_argument("--status")
@@ -102,6 +107,9 @@ def main(argv: list[str] | None = None) -> int:
             with open(args.file, encoding="utf-8") as f:
                 p = projects.import_doc(reg, json.load(f), args.name)
             print(f"imported as project {p['id']} ({p['name']}): {p['stats']['nodes']} nodes, {p['stats']['links']} links")
+            return 0
+        if args.cmd == "project-add-pack":
+            _print(projects.add_pack(reg, args.project_id, args.pack))
             return 0
         if args.cmd == "project-claim":
             projects.claim_legacy(reg, args.project_id, args.user_id)

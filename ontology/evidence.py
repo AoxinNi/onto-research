@@ -34,7 +34,7 @@ BUCKETS = {
 }
 BUCKET_NAMES = {"hour": "小时", "day": "日度", "week": "周度", "month": "月度"}
 LAG_UNITS = {"hour": "小时", "day": "天", "week": "周", "month": "个月"}
-CAUSAL = {"drives", "affects", "sets"}  # links that claim one end moves the other; for these, who leads matters
+CAUSAL = {"drives", "affects", "sets", "influences"}  # links that claim one end moves the other; for these, who leads matters
 MIN_MOVES = 8                            # a step series (a policy rate) needs this many actual changes to say anything
 ROLE_ORDER = ["price_daily", "price", "value", "flow", "supply", "volume", "funding", "open_interest", "sentiment", "heat"]
 

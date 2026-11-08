@@ -67,9 +67,10 @@ def test_registry_created_before_versions_were_recorded(conn):
     # Databases from earlier releases ran the registry SQL directly, with no record of it.
     conn.execute((projects.REGISTRY_MIGRATIONS / "001_registry.sql").read_text())
     conn.execute("INSERT INTO onto_research.projects (id, name, schema_name) VALUES ('kept', 'Kept', 'onto_research_p_kept')")
-    assert projects.upgrade_registry(conn) == ["001_registry"]
+    assert projects.upgrade_registry(conn) == ["001_registry", "002_project_packs"]
     assert projects.upgrade_registry(conn) == []
-    assert conn.execute("SELECT name FROM onto_research.projects WHERE id = 'kept'").fetchone()["name"] == "Kept"
+    kept = conn.execute("SELECT name, packs FROM onto_research.projects WHERE id = 'kept'").fetchone()
+    assert kept == {"name": "Kept", "packs": ["market"]}  # projects from before type packs hold market types
 
 
 def test_a_failing_project_keeps_its_state_and_stops_startup(conn, shipped):
