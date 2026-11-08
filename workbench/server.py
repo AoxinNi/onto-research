@@ -46,7 +46,10 @@ log = logging.getLogger("workbench")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     with connect() as conn:
-        projects.ensure_registry(conn)
+        if os.environ.get("WORKBENCH_AUTO_MIGRATE", "1") == "0":
+            projects.ensure_registry(conn)  # an operator runs `python -m ontology.cli migrate` instead
+        else:
+            projects.upgrade_all(conn)  # raises, so the instance does not start, if a project cannot be upgraded
     tasks = []
     if os.environ.get("WORKBENCH_COLLECT", "0") == "1":
         tasks.append(asyncio.create_task(collect_forever()))

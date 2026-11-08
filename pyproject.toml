@@ -26,7 +26,7 @@ build-backend = "setuptools.build_meta"
 include = ["ontology*", "workbench*"]
 
 [tool.setuptools.package-data]
-ontology = ["schema/*.yaml", "schema/*.sql", "migrations/*.sql"]
+ontology = ["schema/*.yaml", "schema/registry/*.sql", "migrations/*.sql"]
 workbench = ["static/*", "static/vendor/*", "static/vendor/fonts/*"]
 
 [tool.pytest.ini_options]
