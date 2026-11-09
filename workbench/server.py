@@ -36,7 +36,7 @@ from ontology.registry import DEFAULT_PACK, PACKS
 from ontology.store import OntologyStore
 
 from . import agent as agent_mod
-from . import auth, library_api, model_settings, sessions
+from . import auth, library_api, manuscripts_api, model_settings, sessions
 from .agent import WorkbenchAgent
 from .auth import WorkspaceScope
 from .cloud import _json_body
@@ -744,6 +744,8 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
                 await broadcast(project, snapshot(project))
             if event.get("name") in agent_mod.LIBRARY_TOOLS:
                 await broadcast(project, {"type": "library"})
+            if event.get("name") in agent_mod.MANUSCRIPT_TOOLS:
+                await broadcast(project, {"type": "manuscript"})
 
     try:
         await ws.accept()
@@ -815,6 +817,7 @@ async def ws_endpoint(ws: WebSocket, project: str = projects.DEFAULT, session: s
 
 
 library_api.install(app, broadcast=broadcast, snapshot=snapshot, record_history=record_history)
+manuscripts_api.install(app, broadcast=broadcast)
 
 
 def main() -> None:

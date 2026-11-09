@@ -7,6 +7,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     COLLECT_ONCHAIN=0 \
     REPORT_AUTO=0
 
+# pandoc exports papers to DOCX and LaTeX; without it only Markdown and BibTeX export work.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends pandoc \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY pyproject.toml ./
 COPY ontology/ ./ontology/

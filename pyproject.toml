@@ -28,6 +28,7 @@ include = ["ontology*", "workbench*"]
 
 [tool.setuptools.package-data]
 ontology = ["schema/*.yaml", "schema/packs/*.yaml", "schema/registry/*.sql", "migrations/*.sql"]
+"ontology.export" = ["csl/*.csl", "csl/*.md", "templates/*.docx"]
 workbench = ["static/*", "static/vendor/*", "static/vendor/fonts/*"]
 
 [tool.pytest.ini_options]

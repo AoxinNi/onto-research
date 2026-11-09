@@ -423,6 +423,25 @@ def chat_context(project: str, context: Any) -> str:
                 parts.append(f"笔记 {nid}《{lib.get_note(nid)['title'][:120]}》")
             except OntologyError:
                 pass
+        if (sid := context.get("section_id")) and isinstance(sid, str):
+            try:
+                from ontology.manuscripts import Manuscripts
+
+                m = Manuscripts(lib.conn)
+                sec = m.read_section(sid)
+                title = m._row(sec["manuscript_id"])["title"]
+                parts.append(f"论文 {sec['manuscript_id']}《{title[:80]}》的「{sec['heading'][:60]}」（{sid}，rev {sec['rev']}）")
+            except OntologyError:
+                pass
+        elif (mid := context.get("manuscript_id")) and isinstance(mid, str):
+            try:
+                from ontology.manuscripts import Manuscripts
+
+                parts.append(f"论文 {mid}《{Manuscripts(lib.conn)._row(mid)['title'][:80]}》")
+            except OntologyError:
+                pass
+        if (sel := context.get("selection")) and isinstance(sel, str) and sel.strip():
+            parts.append(f"选中的文字：「{sel.strip()[:600]}」")
         if (node := context.get("node_id")) and isinstance(node, str):
             try:
                 parts.append(f"节点 {node}（{store.get_node(node)['name'][:80]}）")

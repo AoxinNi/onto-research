@@ -360,18 +360,35 @@ class Library:
             sets["citekey"] = self._check_citekey(citekey, exclude=item_id)
         if sets:
             cols = ", ".join(f"{k} = %s" for k in sets)
-            self.conn.execute(f"UPDATE library_items SET {cols}, updated_at = now() WHERE id = %s",
-                              (*sets.values(), item_id))
+            with self.conn.transaction():
+                self.conn.execute(f"UPDATE library_items SET {cols}, updated_at = now() WHERE id = %s",
+                                  (*sets.values(), item_id))
+                if "citekey" in sets:
+                    self._rename_citations(row["citekey"], sets["citekey"])
         return self.get_item(item_id)
 
+    def _rename_citations(self, old: str, new: str) -> None:
+        """A renamed citekey is rewritten wherever it is cited: manuscript sections and notes."""
+        from . import cite
+        from .manuscripts import Manuscripts
+
+        Manuscripts(self.conn, actor=self.actor).rename_citekey(old, new)
+        for n in self.conn.execute("SELECT id, body FROM notes WHERE refs->'citekeys' ? %s", (old,)).fetchall():
+            self.update_note(n["id"], body=cite.rename_citekey(n["body"], old, new))
+
     def archive_item(self, item_id: str, restore: bool = False) -> dict[str, Any]:
-        self._item_row(item_id)
+        row = self._item_row(item_id)
         if not restore:
             used = self.conn.execute(
                 "SELECT count(*) AS n FROM groundings WHERE item_id = %s AND status = 'active'", (item_id,)
             ).fetchone()["n"]
             if used:
                 raise OntologyError(f"this source grounds {used} node(s) or link(s); remove those groundings first")
+            from .manuscripts import Manuscripts
+
+            if cited := Manuscripts(self.conn).citing(row["citekey"]):
+                raise OntologyError(f"《{cited[0]['title']}》的「{cited[0]['heading']}」等 {len(cited)} 节引用了这篇文献，"
+                                    "先在论文中删去引用")
         self.conn.execute("UPDATE library_items SET status = %s, updated_at = now() WHERE id = %s",
                           ("active" if restore else "archived", item_id))
         return self.get_item(item_id)
@@ -393,6 +410,9 @@ class Library:
         for g in out["groundings"]:
             g["pending"] = bool(g["pending"])
         out["notes"] = self.notes_citing(item_id=item_id, citekey=out["citekey"])
+        from .manuscripts import Manuscripts
+
+        out["cited_in"] = Manuscripts(self.conn).citing(out["citekey"])
         return out
 
     def list_items(self, q: str | None = None, kind: str | None = None, tag: str | None = None,

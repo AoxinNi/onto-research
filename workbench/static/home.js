@@ -162,7 +162,9 @@ function card(p, i) {
     st.pending > 0 && el("span", { class: "pill review" }, `${st.pending} 项待审核`),
     st.feed_errors > 0 && el("span", { class: "pill bad" }, `${st.feed_errors} 条采集出错`),
   );
-  const chips = [["节点", st.nodes], ["关系", st.links], ["数据流", st.feeds], ["新闻 7d", st.news_7d]];
+  const chips = (p.packs || []).includes("research")
+    ? [["节点", st.nodes], ["关系", st.links], ["文献", st.sources ?? 0], ["论文", st.manuscripts ?? 0]]
+    : [["节点", st.nodes], ["关系", st.links], ["数据流", st.feeds], ["新闻 7d", st.news_7d]];
   return el("article", {
     class: `card${p.status === "archived" ? " archived" : ""}`, style: `--i:${i}`, tabindex: "0", role: "link",
     "aria-label": `打开 ${p.name}`, onclick: open, onkeydown: (e) => { if (e.key === "Enter") open(); },

@@ -3,6 +3,7 @@ import { ForceGraph3D, THREE, CSS2DRenderer, CSS2DObject, UnrealBloomPass } from
 import { TYPES, LINKS, LAYERS, PROVENANCE, NEEDS_GROUNDING, STANCES, lowerLayer, typeOf } from "/static/vocab.js";
 import { currentProject, go, request, routes, socket } from "/static/net.js";
 import { initLibrary } from "/static/library.js";
+import { initWriting } from "/static/writing.js";
 
 // Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
 const PROJECT = currentProject();
@@ -1253,6 +1254,7 @@ function reportStatus() {
 }
 
 function renderReport() {
+  $("#rp-insert").hidden = !report || !!viewingAt;
   sentenceIndex.clear();
   pinned = null;
   reportFocus = null;
@@ -1312,6 +1314,7 @@ function renderReport() {
   body.replaceChildren(...parts.filter(Boolean));
 }
 
+$("#rp-insert").addEventListener("click", () => { if (report) writing.insertReport(report); });
 $("#rp-regen").addEventListener("click", async () => {
   reportState = { ...(reportState || {}), writing: true };
   reportStatus();
@@ -1613,33 +1616,53 @@ function showProject(p) {
   document.title = `${p.name} · 本体工作台`;
 }
 
-// ------------------------------------------------------------------ modes: graph / library
+// ------------------------------------------------------------------ modes: graph / library / writing
 
+const MODES = ["graph", "library", "writing"];
 let mode = "graph";
-let chatContext = null;      // what the library shows, sent with chat messages so the agent knows
+let chatContext = null;      // what the library or the paper shows, sent with chat messages so the agent knows
+let writingContext = null;
+const openNodeInGraph = (id) => {
+  if (!nodes.has(id)) { toast("这个节点不在当前的图里", true); return; }
+  setMode("graph");
+  select({ kind: "node", id }, true);
+};
 const library = initLibrary({
   root: $("#library"),
   q,
   toast,
   nodes: () => graph.nodes,
-  openNode: (id) => {
-    if (!nodes.has(id)) { toast("这个节点不在当前的图里", true); return; }
-    setMode("graph");
-    select({ kind: "node", id }, true);
-  },
+  openNode: openNodeInGraph,
   setContext: (ctx) => { chatContext = ctx; },
+  askAgent: (text, now = true) => askAgent(text, now),
+});
+const writing = initWriting({
+  root: $("#writing"),
+  q,
+  toast,
+  nodes: () => graph.nodes,
+  openNode: openNodeInGraph,
+  openItem: (id) => { setMode("library"); library.openItem(id); },
+  setContext: (ctx) => { writingContext = ctx; },
   askAgent: (text, now = true) => askAgent(text, now),
 });
 
 function setMode(next) {
-  if (next === mode) return;
+  if (next === mode || !MODES.includes(next)) return;
+  const was = mode;
   mode = next;
   document.body.classList.toggle("mode-library", mode === "library");
+  document.body.classList.toggle("mode-writing", mode === "writing");
   for (const b of document.querySelectorAll("#modes [data-mode]")) b.setAttribute("aria-checked", String(b.dataset.mode === mode));
-  if (mode === "library") { select(null); library.show(); } else library.hide();
-  history.replaceState(null, "", mode === "library" ? "#library" : location.pathname + location.search);
+  if (mode !== "graph") select(null);
+  if (was === "library") library.hide();
+  if (was === "writing") writing.hide();
+  if (mode === "library") library.show();
+  if (mode === "writing") writing.show();
+  history.replaceState(null, "", mode === "graph" ? location.pathname + location.search : `#${mode}`);
 }
 for (const b of document.querySelectorAll("#modes [data-mode]")) b.addEventListener("click", () => setMode(b.dataset.mode));
+addEventListener("onto:mode", (e) => setMode(e.detail));
 
 function askAgent(text, now = true) {
   if (document.body.classList.contains("panel-collapsed")) dockActions.panel();
@@ -1665,10 +1688,12 @@ function connect() {
       liveSnapshot = msg;
       if (viewingAt) return;  // keep showing the past state; "回到现在" brings the live one back
       showProject(msg.project); applyGraph(msg.graph); renderReview(msg.review, msg.proposed_types);
+      writing.onGraph();
       if (msg.news_refreshed != null && lastRefresh) toast(msg.news_refreshed ? `新闻已更新：${msg.news_refreshed} 篇新报道` : "新闻已是最新");
     }
     else if (msg.type === "history") loadHistory();
     else if (msg.type === "library") library.onMessage(msg);
+    else if (msg.type === "manuscript") writing.onMessage(msg);
     else if (msg.type === "session") showSession(msg);
     else if (msg.type === "report") {
       if (viewingAt) return;
@@ -1691,13 +1716,13 @@ function connect() {
   };
 }
 connect();
-if (location.hash === "#library") setMode("library");
+if (MODES.includes(location.hash.slice(1))) setMode(location.hash.slice(1));
 addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
 
 function send(text = input.value.trim()) {
   if (!text || busy || ws.readyState !== WebSocket.OPEN) return;
   log("user", text);
-  const context = mode === "library" ? chatContext : null;
+  const context = mode === "library" ? chatContext : mode === "writing" ? writingContext : null;
   ws.send(JSON.stringify({ type: "chat", text, ...(context ? { context } : {}) }));
   input.value = "";
   autosize();
@@ -1729,6 +1754,7 @@ addEventListener("keydown", (e) => {
   }
   if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
   const map = { r: "fit", " ": "rotate", l: "labels", "\\": "panel", u: "refresh", t: "timeline" };
+  if (["1", "2", "3"].includes(e.key)) { e.preventDefault(); setMode(MODES[Number(e.key) - 1]); return; }
   if (e.key === "/") { e.preventDefault(); if (document.body.classList.contains("panel-collapsed")) dockActions.panel(); input.focus(); }
   else if (map[e.key.toLowerCase()] && !(map[e.key.toLowerCase()] !== "panel" && graph.nodes.length === 0)) { e.preventDefault(); dockActions[map[e.key.toLowerCase()]](); }
 });

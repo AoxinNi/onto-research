@@ -27,6 +27,7 @@ from psycopg.conninfo import make_conninfo
 from .db import connect, migrate
 from .errors import OntologyError
 from .library import Library
+from .manuscripts import Manuscripts
 from .registry import DEFAULT_PACK, LEGACY_PACK, PACKS, load_seed
 from .store import OntologyStore
 
@@ -265,6 +266,8 @@ def summary(conn: psycopg.Connection, p: dict[str, Any]) -> dict[str, Any]:
                                 WHERE b.status = 'active' AND s.status = 'error'""")["n"],
             "news_7d": q("""SELECT count(DISTINCT m.document_id) AS n FROM mentions m JOIN documents d ON d.id = m.document_id
                             WHERE d.published_at > now() - interval '7 days'""")["n"],
+            "sources": q("SELECT count(*) AS n FROM library_items WHERE status = 'active'")["n"],
+            "manuscripts": q("SELECT count(*) AS n FROM manuscripts WHERE status = 'active'")["n"],
         }
         last = q("""SELECT greatest((SELECT max(updated_at) FROM objects), (SELECT max(updated_at) FROM links),
                                     (SELECT max(coalesce(decided_at, submitted_at, created_at)) FROM changesets)) AS t""")["t"]
@@ -316,6 +319,7 @@ def export(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
                ORDER BY b.created_at"""
         ).fetchall()
         lib = Library(pc).export()
+        papers = Manuscripts(pc).export()
         groundings = pc.execute(
             """SELECT g.node_id, l.type AS link_type, l.from_id, l.to_id, g.item_id, g.excerpt_id, g.stance, g.rationale
                FROM groundings g LEFT JOIN changesets c ON c.id = g.changeset_id LEFT JOIN links l ON l.id = g.link_id
@@ -340,6 +344,7 @@ def export(conn: psycopg.Connection, project_id: str) -> dict[str, Any]:
         "bindings": [{"node": b["node_id"], "role": b["role"], "source": b["source"], "params": b["params"],
                       "unit": b["unit"], "label": b["label"], "rationale": b["rationale"]} for b in bindings],
         **library,
+        **({"manuscripts": papers} if papers else {}),
     }
 
 
@@ -398,6 +403,10 @@ def import_doc(conn: psycopg.Connection, doc: dict[str, Any], name: str | None =
                                   b.get("rationale") or "导入", unit=b.get("unit"), label=b.get("label"))
             if lib_doc := doc.get("library"):
                 _import_library(pc, human, lib_doc, refs)
+            if papers := doc.get("manuscripts"):
+                if not isinstance(papers, list):
+                    raise OntologyError("manuscripts must be a list")
+                Manuscripts(pc, actor="import").import_export(papers, refs)
     except (OntologyError, KeyError, TypeError) as e:
         drop(conn, p["id"])  # an import is all or nothing
         raise OntologyError(f"import failed: {e if isinstance(e, OntologyError) else f'missing field {e}'}") from None

@@ -42,6 +42,31 @@ Agent 只能通过标识符添加文献，不能自己填写题录。它写入�
 
 文献库功能新增了依赖 `pypdf`，升级后需要重新执行 `pip install -e '.[dev]'`。新的表由项目迁移 `010_library`、`011_groundings` 创建，工作台启动时会应用到所有已有项目（见「数据库迁移」）。
 
+### 写作
+
+模式切换里的「写作」（快捷键 `3`；`1` 图谱，`2` 文献）打开项目里的论文。一篇论文由若干节组成，每节用 Markdown 写：
+
+- `[@引用键]`、`[@甲; @乙, 第 12 页]` 引用文献库里的文献。输入 `[@` 会弹出文献库的候选。
+- `[这句话]{.claim node=n_…}` 把一句话锚定到图中的论断。输入 `[[`，或者选中句子后点「锚定论断」，按句子内容推荐节点。
+- 右侧列出本节引用的文献和锚定的论断及其依据。「引用检查」报告文献库里找不到的引用键、指向不存在或待审核节点的锚点、没有依据的论断，以及引用的文献和论断依据对不上的地方。
+- 正文停止输入 1.5 秒后自动保存。保存时带上开始编辑时的版本号；如果另一个页面或 Agent 已经改过这一节，页面会显示两边的差别，由你选用哪一版。每节保留历史版本，可以恢复。
+
+Agent 不直接改论文。它通过 `suggest_edit`、`suggest_section`、`suggest_outline` 提出改写、新增一节或调整大纲，页面以差别的形式显示，由你逐条接受或拒绝。研报面板的「插入论文」把选中的研报段落变成待接受的新节：涉及论断的句子带上锚点，并引用这些论断已生效的文献依据。
+
+导出：
+
+| 格式 | 内容 | 需要 pandoc |
+| --- | --- | --- |
+| Word（DOCX） | 按所选 CSL 样式排好引用和参考文献，宋体正文、黑体标题、A4 版面 | 是 |
+| LaTeX 工程（zip） | `main.tex`（ctexart/ctexrep + biblatex，GB/T 7714 用 `gb7714-2015` 样式）、`references.bib` 和编译说明，用 `latexmk -xelatex` 编译 | 是 |
+| Markdown + BibTeX（zip） | 保留 `[@引用键]` 的 Pandoc Markdown 和 `.bib`、CSL-JSON | 否 |
+| Markdown（引用已排版） | 引用换成编号或作者-年份，文末附参考文献 | 否（没有 pandoc 时用简化格式） |
+| BibTeX | 本文引用的文献 | 否 |
+
+引用样式有 GB/T 7714—2015 顺序编码制和著者-出版年制、APA、Chicago 著者-出版年制、IEEE，CSL 文件随代码分发（见 `ontology/export/csl/README.md`）。pandoc 总是带 `--sandbox` 运行，正文里的图片链接、文件路径不会被读取。
+
+服务端从 `PATH` 中查找 pandoc，也可以用 `WORKBENCH_PANDOC` 指定路径。镜像（`Dockerfile`）安装的是 Debian 自带的 pandoc；本地开发请自行安装（如 `brew install pandoc`）。论文的表由项目迁移 `012_manuscripts` 创建。
+
 ## 本地开发
 
 用 Python 3.11 或更新版本安装依赖。将 `.env.example` 复制为 `.env`，设置 PostgreSQL 的 `DATABASE_URL`。

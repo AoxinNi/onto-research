@@ -566,7 +566,7 @@ WebSocket 新增事件 `{"type":"manuscript","id":…,"sections":[…]}` 和 `{"
 | --- | --- | --- |
 | **P0 类型包**（已完成） | `packs/research.yaml` 与 `market.yaml`，新增 layer 值，`projects.pack`，新建项目时选择类型包，`add-pack` 及同名类型合并，画布对两个新 layer 的画法，Agent 说明和研报提示词按类型包区分 | 新项目默认使用研究类型，能建出 Q/H/C/O 并连上关系；已有 BTC 项目不受影响，追加研究类型后 `validate_graph` 没有违规项；测试覆盖类型合并和旧导出文件的导入 |
 | **P1 文献库与依据**（已实现，桌面端拖放尚未在打包后的应用中实测） | 010/011 迁移；文献接口；DOI/arXiv/ISBN/URL 解析；PDF 上传与文本提取；BibTeX/RIS 导入；摘录与原文校验；笔记；依据接入变更集，支持撤销和历史；§5.1–5.2 的 MCP 工具；文献模式界面；图谱模式的「依据」区和「无依据」标记；桌面端 `upload_file`、`upload_dropped`、`api_bytes` | 网页端和桌面端都能拖入 PDF、看到全文、选中原文生成摘录并关联节点；Agent 能按 DOI 加入文献、写入经过校验的摘录、提出依据，人工接受后进入历史，撤销后干净回退；pytest 覆盖依据的撤销和合并、摘录校验、上传大小上限、SSRF 防护，cargo test 覆盖票据和字节通道 |
-| **P2 论文与导出** | 012 迁移；写作模式（大纲、分节编辑、自动保存与 409 处理、引用补全、预览）；改稿建议的对比显示与接受；引用检查；pandoc 导出 DOCX/LaTeX/MD/BibTeX；研报插入为草稿节；§5.3 的工具 | 能写一篇带十几条 GB/T 7714 引用的中文论文，导出的 DOCX 中参考文献格式正确，LaTeX zip 能用 `latexmk -xelatex` 直接编译；Agent 提交的改稿建议能逐条接受；两个页面同时编辑同一节时出现冲突提示 |
+| **P2 论文与导出**（已实现，LaTeX 工程未在本机编译验证） | 012 迁移；写作模式（大纲、分节编辑、自动保存与 409 处理、引用补全、预览）；改稿建议的对比显示与接受；引用检查；pandoc 导出 DOCX/LaTeX/MD/BibTeX；研报插入为草稿节；§5.3 的工具 | 能写一篇带十几条 GB/T 7714 引用的中文论文，导出的 DOCX 中参考文献格式正确，LaTeX zip 能用 `latexmk -xelatex` 直接编译；Agent 提交的改稿建议能逐条接受；两个页面同时编辑同一节时出现冲突提示 |
 | P3 以后 | pdf.js 阅读器和 PDF 内高亮；Zotero 同步；`search_scholarly` 扩展到 Semantic Scholar；语义检索（看 pgvector 是否可用）；图表与交叉引用；所见即所得编辑器；对象存储 | 另行设计 |
 
 ### P0 实施记录（与上文的差异）
@@ -594,6 +594,22 @@ WebSocket 新增事件 `{"type":"manuscript","id":…,"sections":[…]}` 和 `{"
 - **推迟到 P3**：`api_bytes` 和 pdf.js 阅读器、正文内的摘录高亮、三元组（trigram）索引（P1 的检索用 ILIKE 匹配元数据和正文块）。浏览器可以用 `GET /api/library/files/{id}?inline=1` 直接打开 PDF。
 - **界面范围**：「关联到节点」对话框只能选节点；关系上的依据目前由 Agent 或接口添加。
 - **桌面端**：`upload_file` 用系统文件对话框选文件，`upload_dropped` 处理拖放。拖放事件在 Rust 侧收到，页面只拿到文件名和一次性票据（有效期 120 秒，每个文件只能上传一次），拿不到磁盘路径。字节由 `Backend::send_bytes` 直接发给服务器，不经过 IPC 的 JSON。`disposition_filename` 支持 RFC 5987 的 `filename*`。
+
+### P2 实施记录（与上文的差异）
+
+- **迁移**：`012_manuscripts.sql` 建 `manuscripts`、`manuscript_sections`、`section_revisions`、`section_suggestions` 四张表，由启动时的 `upgrade_all()` 应用到已有项目。
+- **保存与历史**：保存必须带 `base_rev`，不一致时返回 409，附上当前的标题、正文、版本号和修改人。同一作者 5 分钟内的连续保存合并成一个历史版本，避免自动保存把历史刷满。正文上限 20 万字符。
+- **建议**：改写建议必须基于当前版本（`suggest_edit` 校验 `base_rev`）。之后正文又被改过，建议标为「正文已改动」（stale），页面上仍可对照差别后强制接受。大纲建议只补上论文中缺少的标题（带写作意图注释），放在大纲中前一个已有标题及其子节之后；已有的节不移动、不删除、不改名。
+- **引用键改名**：文献改了引用键时，论文和笔记里的 `@旧键` 一并改写（跳过代码块和以旧键为前缀的更长的键）。被论文引用的文献不能归档。
+- **引用检查**：格式不对的节点编号（如 `node=n_x`）也算锚点，报「节点不存在」，和预览的红色标记一致。句子切分不把半角分号当句末，否则 `[@a; @b]` 会被切开。
+- **预览**：不用 marked/DOMPurify，而是自写的 Markdown 子集渲染器（段落、标题、列表、引用块、代码、强调、链接、图片占位），只生成 DOM 节点，正文里的 HTML 一律当文本显示。引用标签和参考文献来自 `GET /api/manuscripts/{id}/references`：有 pandoc 时用 citeproc 生成（读取 JSON AST，按样式和条目缓存），没有时退回 Python 的简化格式（`engine: "plain"`）。建议里引用了论文还没引用过的文献时，显示为 `[@键]`，不当作错误。
+- **引用栏位置**：本节引用和引用检查放在写作模式的右栏，没有放进 Agent 面板的标签页。窗口较窄（≤1500px）时右栏移到正文下方。
+- **导出**：DOCX 用 `--citeproc` 加 CSL 样式和 `reference-zh.docx`（由 `templates/make_reference_docx.py` 从 pandoc 默认模板生成）。LaTeX 工程用 biblatex + biber（`gb7714-2015`、`gb7714-2015ay`、`apa`、`ieee`、`chicago-authordate`），`.bib` 由 pandoc 从 CSL-JSON 转换，去掉 biblatex 不认识的 `langid = {zh-CN}`。「引用已排版」的 Markdown 由 Python 用 citeproc 的标签和条目拼成，pandoc 的 markdown/gfm 输出会带上标和 div，不适合直接给人改。
+- **未验证**：LaTeX 工程只检查了 zip 内容（文档类、biblatex 选项、`\autocite`、`\printbibliography`），没有在本机用 `latexmk -xelatex` 编译。镜像里的 pandoc 来自 Debian 软件源，版本比开发时用的 3.13 旧，导出结果尚未在镜像里核对。
+- **研报插入**：研报句子里的 `[`、`]` 换成全角，避免和引用、锚点语法混淆；只有论断、假设、观测这类节点会成为锚点，引用的是它们已生效且不是「反驳」的依据。
+- **聊天上下文**：写作模式里发消息时附带 `{manuscript_id, section_id, selection}`，服务端换成「（我正在看：论文 ms_…《标题》的「节标题」（sec_…，rev n）；选中的文字：「…」）」放在消息前面，选中的文字最多 600 字。
+- **页面通知**：论文变化广播 `{"type": "manuscript", "id"}`。页面重新读取时，有未保存内容或有焦点的节保持原样，其他节换成新内容。
+- **快捷键**：`1`、`2`、`3` 切换图谱、文献、写作。
 
 依赖关系是 P0 → P1 → P2，三期都会改 `store.py`、`mcp_server.py`、`app.js` 和 `index.html`，**不适合并行开发**。P1 内部，桌面端的 Rust 命令可以和服务端同时开发，前提是先确定接口。
 
