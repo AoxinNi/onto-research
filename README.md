@@ -29,9 +29,11 @@ python3 -m venv .venv
 | `WORKBENCH_REGISTRATION_PROVIDERS` | 自助注册渠道，可填 `sms`、`wechat` 或 `sms,wechat`，默认关闭 |
 | `ANTHROPIC_API_KEY`、`ANTHROPIC_BASE_URL`、`WORKBENCH_MODEL` | 可选模型服务配置 |
 | `WORKBENCH_MODEL_SETTINGS_KEY` | 云端保存个人模型凭据用的 AES-256 密钥，32 字节随机值的 Base64 编码，保存在服务环境中并跨版本保留 |
+| `WORKBENCH_AUTO_MIGRATE` | 启动时自动升级数据库表结构，默认开启；设为 `0` 时改由运营者手动执行迁移 |
+| `WORKBENCH_DESKTOP_SESSION_DAYS` | 桌面端会话有效天数，1–90，默认 14 |
 | `WORKBENCH_MODEL_ALLOWED_HOSTS` | 云端自定义模型可访问的 HTTPS 域名，以逗号分隔，默认 `api.anthropic.com` |
 
-目前使用单个工作台实例。项目连接依赖 PostgreSQL 会话级 `search_path`。启动时初始化 `onto_research` 注册表，首次创建项目时会在 `onto_research_p_*` 下应用项目迁移，因此数据库登录角色需要访问注册表并创建项目 schema。
+目前使用单个工作台实例。项目连接依赖 PostgreSQL 会话级 `search_path`。共享的 `onto_research` schema 保存注册表、会话和账号，每个项目使用自己的 `onto_research_p_*` schema。数据库登录角色需要访问注册表并能创建项目 schema。表结构的升级方式见下方「数据库迁移」。
 
 先在 CloudBase 身份认证里启用账号密码登录并准备首个账号，再把该账号的用户 ID 加入允许名单。凭据由用户在登录页输入。工作台会话最长两小时，可通过退出登录立即撤销。
 
@@ -62,6 +64,31 @@ python3 -m venv .venv
 本机运行工作台时可选择 Magpie 或 CC Switch。Magpie 读取其本地设置里的端口，默认 3425。CC Switch 默认 15721，开启 Claude Code 路由后可读取其写入 Claude 设置的本机地址。工作台使用路由暴露的 Messages 接口和可用模型目录，本机配置以仅用户可读写的权限保存在 `~/.config/onto-research/model.json`（或 `$XDG_CONFIG_HOME` 下的对应位置）。CloudBase 运行在云端，无法直接访问电脑的回环端口。
 
 本地配置、密钥、测试数据和虚拟环境都应排除在上传目录外。上传到云托管的源代码目录仅需 `Dockerfile`、`.dockerignore`、`pyproject.toml`、`ontology/` 和 `workbench/`。容器进程以非 root 用户运行。
+
+## 数据库迁移
+
+表结构变更以编号 SQL 文件提交，每个文件在一个事务中执行，执行记录写入对应 schema 的 `schema_migrations` 表：
+
+- 项目表：`ontology/migrations/NNN_说明.sql`，应用到每个项目的 schema。
+- 共享表（注册表、会话、账号、模型设置）：`ontology/schema/registry/NNN_说明.sql`，应用到 `onto_research`。
+
+工作台启动时，会先升级共享表，再升级所有项目（包括已归档和属于其他账号的项目），然后才开始服务。多个实例同时启动时由数据库锁排队，每个迁移只执行一次。某个项目迁移失败时，该项目保持原状，其他项目照常升级，但工作台不会启动，日志会写明失败的项目。在 CloudBase 上这表现为新版本健康检查失败，旧版本继续提供服务。
+
+开发流程：在本地数据库编写并测试迁移，提交后部署到 CloudBase，新版本启动时会自动完成升级，无需手动连接云端数据库。迁移文件发布后不要修改，后续变更请新增文件。
+
+设置 `WORKBENCH_AUTO_MIGRATE=0` 可关闭自动升级，改由运营者在能访问数据库的环境中手动执行：
+
+```sh
+.venv/bin/python -m ontology.cli migrate
+```
+
+自动升级只修改表结构，不会把 `types.yaml` 中的种子类型重新同步到已有项目，以免覆盖项目中已确认或导入的类型。如果需要更新已有项目的类型，请对每个项目执行 `--project <id> init`。
+
+## 桌面端
+
+`desktop/` 是 Tauri 2 桌面应用，复用本仓库的工作台页面，连接 CloudBase 上的工作台或本机工作台。启动后依次是登录层、项目总览层和项目工作层。会话令牌保存在系统钥匙串中，网页层无法读取。开发、架构和发布说明见 [desktop/README.md](desktop/README.md)。
+
+服务端对桌面端请求使用 Bearer 会话（请求头 `X-Onto-Client: desktop/<版本>`），默认有效 14 天，可通过 `WORKBENCH_DESKTOP_SESSION_DAYS`（1–90）调整。会话保存在服务端，可随时撤销。
 
 ## 测试
 

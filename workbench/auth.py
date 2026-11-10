@@ -1,8 +1,16 @@
-"""CloudBase sign-in and revocable, same-origin workbench sessions."""
+"""CloudBase sign-in and revocable workbench sessions.
+
+Browsers hold the session in an HttpOnly cookie and must send a matching Origin. The desktop app holds it in the
+operating system's credential store and sends it as a bearer token with an `X-Onto-Client: desktop/<version>`
+header. A browser cannot attach that header to a cross-origin request without a CORS preflight, which the
+workbench never grants, and a desktop request never uses ambient cookies, so neither path can be forged by
+another site.
+"""
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import secrets
 
@@ -16,6 +24,9 @@ COOKIE = "__Host-onto_session"
 USER_ID = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 SESSION_TOKEN = re.compile(r"[A-Za-z0-9_-]{43}")
 MAX_SESSION_SECONDS = 7200
+CLIENT_HEADER = "x-onto-client"
+DESKTOP_CLIENT = re.compile(r"desktop/[0-9A-Za-z.+-]{1,32}")
+DEFAULT_DESKTOP_SESSION_DAYS = 14
 
 
 class LoginError(Exception):
@@ -80,6 +91,24 @@ async def cloudbase_sign_in(env_id: str, username: str, password: str) -> tuple[
             raise LoginError(401, "无法登录，请检查账号和密码。") from None
         raise LoginError(503, "登录服务暂时不可用。") from None
     return verified_identity(result)
+
+
+def desktop_client(headers) -> bool:
+    return bool(DESKTOP_CLIENT.fullmatch(headers.get(CLIENT_HEADER, "")))
+
+
+def bearer_token(headers) -> str:
+    scheme, _, value = headers.get("authorization", "").partition(" ")
+    return value.strip() if scheme.lower() == "bearer" else ""
+
+
+def desktop_session_seconds() -> int:
+    """Desktop sessions outlive browser ones (the token sits in the OS keychain) but stay revocable server-side."""
+    try:
+        days = int(os.environ.get("WORKBENCH_DESKTOP_SESSION_DAYS", DEFAULT_DESKTOP_SESSION_DAYS))
+    except ValueError:
+        days = DEFAULT_DESKTOP_SESSION_DAYS
+    return max(1, min(days, 90)) * 86400
 
 
 def digest(token: str) -> str:

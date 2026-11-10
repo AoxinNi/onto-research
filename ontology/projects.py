@@ -10,8 +10,11 @@ the store and every tool work unchanged once the connection points at it. The em
 
 from __future__ import annotations
 
+import logging
 import re
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
@@ -32,7 +35,12 @@ OLD_FORMATS = {"btc-ontology/1"}  # files exported before the rename still impor
 ID = re.compile(r"^[a-z][a-z0-9_-]{1,40}$")
 SAMPLE_NODES = 60  # nodes per project sent to the home page for its mini constellation
 
-REGISTRY = Path(__file__).parent / "schema" / "bootstrap.sql"
+# Migrations of the shared `onto_research` schema (registry, sessions, accounts), applied in file-name order and
+# recorded in onto_research.schema_migrations. Project schemas use ontology/migrations/ (db.migrate).
+REGISTRY_MIGRATIONS = Path(__file__).parent / "schema" / "registry"
+MIGRATION_LOCK = "onto_research.migrate"
+
+log = logging.getLogger("ontology.migrations")
 
 # None is reserved for trusted CLI and background work. The local web app is
 # scoped to legacy/development projects with no account owner.
@@ -45,13 +53,76 @@ def _owner_params() -> tuple[str | None, str | None]:
     return owner, owner
 
 
+@contextmanager
+def _migration_lock(conn: psycopg.Connection) -> Iterator[None]:
+    """One migrator at a time across every workbench instance sharing the database (session lock, re-entrant)."""
+    conn.execute("SELECT pg_advisory_lock(hashtext(%s))", (MIGRATION_LOCK,))
+    try:
+        yield
+    finally:
+        conn.execute("SELECT pg_advisory_unlock(hashtext(%s))", (MIGRATION_LOCK,))
+
+
 def ensure_registry(conn: psycopg.Connection) -> None:
+    """Cheap check on every request: create the registry on an empty database. Later registry migrations are
+    applied at startup by upgrade_all, so a request never waits on them."""
     if conn.execute("SELECT to_regclass('onto_research.web_model_settings') AS registry").fetchone()["registry"]:
         return
-    with conn.transaction():
-        conn.execute("SELECT pg_advisory_xact_lock(hashtext('onto_research.bootstrap'))")
-        if not conn.execute("SELECT to_regclass('onto_research.web_model_settings') AS registry").fetchone()["registry"]:
-            conn.execute(REGISTRY.read_text(encoding="utf-8"))
+    upgrade_registry(conn)
+
+
+def upgrade_registry(conn: psycopg.Connection) -> list[str]:
+    """Apply pending migrations of the shared schema; returns the versions applied now. Each migration runs in its
+    own transaction; the first one is written to be safe on databases created before versions were recorded."""
+    applied = []
+    with _migration_lock(conn):
+        conn.execute("CREATE SCHEMA IF NOT EXISTS onto_research")
+        conn.execute("""CREATE TABLE IF NOT EXISTS onto_research.schema_migrations (
+                            version text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())""")
+        conn.execute("ALTER TABLE onto_research.schema_migrations ENABLE ROW LEVEL SECURITY")
+        done = {r["version"] for r in conn.execute("SELECT version FROM onto_research.schema_migrations")}
+        for path in sorted(REGISTRY_MIGRATIONS.glob("*.sql")):
+            if path.stem in done:
+                continue
+            with conn.transaction():
+                conn.execute(path.read_text(encoding="utf-8"))
+                conn.execute("INSERT INTO onto_research.schema_migrations (version) VALUES (%s)", (path.stem,))
+            applied.append(path.stem)
+    return applied
+
+
+def upgrade_all(conn: psycopg.Connection) -> dict[str, list[str]]:
+    """Bring the shared schema and every project schema (active and archived, every owner) up to the migrations
+    this code ships. Returns {schema: versions applied now}; schemas already current are left out.
+
+    Safe to run from several instances at once. A project whose migration fails keeps its previous state (each
+    migration is one transaction); the others are still upgraded, and the call then raises so that the caller,
+    normally server startup, refuses to serve a database it does not match."""
+    results: dict[str, list[str]] = {}
+    failed: list[str] = []
+    with _migration_lock(conn):
+        if applied := upgrade_registry(conn):
+            results["onto_research"] = applied
+        rows = conn.execute("SELECT id, schema_name FROM onto_research.projects ORDER BY id").fetchall()
+        for row in rows:
+            schema = row["schema_name"]
+            if not conn.execute("SELECT to_regnamespace(%s) AS ns", (schema,)).fetchone()["ns"]:
+                log.warning("project %s has no schema %s; skipped", row["id"], schema)
+                continue
+            try:
+                conn.execute(sql.SQL("SET search_path TO {}").format(sql.Identifier(schema)))
+                if applied := migrate(conn):
+                    results[schema] = applied
+            except psycopg.Error:
+                log.exception("migrating project %s failed", row["id"])
+                failed.append(row["id"])
+            finally:
+                conn.execute("RESET search_path")
+    for schema, versions in results.items():
+        log.info("applied %s to %s", ", ".join(versions), schema)
+    if failed:
+        raise OntologyError(f"migrations failed for project(s) {', '.join(failed)}; see the log")
+    return results
 
 
 def active_ids(conn: psycopg.Connection) -> list[str]:

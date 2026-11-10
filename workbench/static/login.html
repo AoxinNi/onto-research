@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
   <title>登录 · 本体工作台</title>
+  <link rel="preload" href="/static/vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/home.css">
 </head>
@@ -18,43 +19,78 @@
         <p class="lede">登录你的私有研究工作区。</p>
       </div>
     </header>
-    <form id="login-form" class="panel-card login-form" method="post" action="/auth/login">
-      <label class="field">
-        <span>手机号或用户名</span>
-        <input name="username" autocomplete="username" maxlength="254" required>
-      </label>
-      <label class="field">
-        <span>密码</span>
-        <input name="password" type="password" autocomplete="current-password" maxlength="256" required>
-      </label>
-      <button type="submit" class="btn primary lg" disabled>登录</button>
-      <p id="login-error" class="test-result bad" role="alert" hidden></p>
-    </form>
-    <section id="register-panel" class="panel-card login-form" hidden>
-      <h2 id="register-title">注册</h2>
-      <form id="sms-form" class="login-form" method="post" action="/auth/sms/complete" hidden>
-        <label class="field">
-          <span>中国大陆手机号</span>
-          <input name="phone" type="tel" autocomplete="username" maxlength="32" required>
-        </label>
-        <button class="btn lg" id="sms-send" type="button">发送验证码</button>
-        <div id="sms-complete" class="login-form" hidden>
-          <label class="field">
-            <span>短信验证码</span>
-            <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required disabled>
-          </label>
-          <label class="field">
-            <span>登录密码</span>
-            <input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="32" aria-describedby="password-hint" required disabled>
-          </label>
-          <p id="password-hint">8–32 位，大写字母、小写字母、数字、符号中至少包含三类。</p>
-          <button class="btn primary lg" type="submit" disabled>验证并注册</button>
-        </div>
-        <button class="btn lg" id="sms-mode" type="button">已有账号？设置或重设密码</button>
-      </form>
-      <button class="btn lg" id="wechat-start" type="button" hidden>微信扫码</button>
-      <p id="register-message" class="test-result" aria-live="polite" hidden></p>
+
+    <p id="boot-status" class="boot-status" role="status" hidden>正在连接工作台…</p>
+
+    <section id="connection-error" class="panel-card connection-error" role="alert" hidden>
+      <p id="connection-error-text">无法连接工作台。</p>
+      <div class="row-actions">
+        <button class="btn lg primary" id="connection-retry" type="button">重试</button>
+        <button class="btn lg" id="connection-change" type="button">更改服务器</button>
+      </div>
     </section>
+
+    <div id="auth" hidden>
+      <div id="auth-tabs" class="auth-tabs" role="tablist" aria-label="登录或注册" hidden>
+        <button type="button" role="tab" id="tab-login" aria-controls="login-form" aria-selected="true">登录</button>
+        <button type="button" role="tab" id="tab-register" aria-controls="register-panel" aria-selected="false">注册</button>
+      </div>
+
+      <form id="login-form" class="panel-card login-form" method="post" action="/auth/login" role="tabpanel" aria-labelledby="tab-login">
+        <label class="field">
+          <span>手机号或用户名</span>
+          <input name="username" autocomplete="username" maxlength="254" required>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input name="password" type="password" autocomplete="current-password" maxlength="256" required>
+        </label>
+        <button type="submit" class="btn primary lg" disabled>登录</button>
+        <p id="login-error" class="test-result bad" role="alert" hidden></p>
+      </form>
+
+      <section id="register-panel" class="panel-card login-form" role="tabpanel" aria-labelledby="tab-register" hidden>
+        <h2 id="register-title">注册</h2>
+        <form id="sms-form" class="login-form" method="post" action="/auth/sms/complete" hidden>
+          <label class="field">
+            <span>中国大陆手机号</span>
+            <input name="phone" type="tel" autocomplete="username" maxlength="32" required>
+          </label>
+          <button class="btn lg" id="sms-send" type="button">发送验证码</button>
+          <div id="sms-complete" class="login-form" hidden>
+            <label class="field">
+              <span>短信验证码</span>
+              <input name="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required disabled>
+            </label>
+            <label class="field">
+              <span>登录密码</span>
+              <input name="password" type="password" autocomplete="new-password" minlength="8" maxlength="32" aria-describedby="password-hint" required disabled>
+            </label>
+            <p id="password-hint">8–32 位，大写字母、小写字母、数字、符号中至少包含三类。</p>
+            <button class="btn primary lg" type="submit" disabled>验证并注册</button>
+          </div>
+          <button class="btn lg" id="sms-mode" type="button">已有账号？设置或重设密码</button>
+        </form>
+        <button class="btn lg" id="wechat-start" type="button" hidden>微信扫码</button>
+        <p id="register-message" class="test-result" aria-live="polite" hidden></p>
+      </section>
+    </div>
+
+    <details id="server-panel" class="server-panel" hidden>
+      <summary>服务器 <span id="server-current" class="server-current"></span></summary>
+      <form id="server-form" class="login-form">
+        <label class="field">
+          <span>工作台地址</span>
+          <input name="url" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="https://research.example.com" required>
+        </label>
+        <p class="field-note">使用 HTTPS 地址。本机开发可填 http://127.0.0.1:8766。</p>
+        <div class="row-actions">
+          <button class="btn primary lg" type="submit">保存并连接</button>
+          <button class="btn lg" id="server-reset" type="button">恢复默认</button>
+        </div>
+        <p id="server-error" class="test-result bad" role="alert" hidden></p>
+      </form>
+    </details>
   </main>
   <script type="module" src="/static/login.js"></script>
 </body>

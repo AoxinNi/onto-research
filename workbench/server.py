@@ -35,7 +35,7 @@ from ontology.errors import OntologyError
 from ontology.store import OntologyStore
 
 from . import agent as agent_mod
-from . import model_settings, sessions
+from . import auth, model_settings, sessions
 from .agent import WorkbenchAgent
 from .auth import WorkspaceScope
 from .cloud import _json_body
@@ -46,7 +46,10 @@ log = logging.getLogger("workbench")
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     with connect() as conn:
-        projects.ensure_registry(conn)
+        if os.environ.get("WORKBENCH_AUTO_MIGRATE", "1") == "0":
+            projects.ensure_registry(conn)  # an operator runs `python -m ontology.cli migrate` instead
+        else:
+            projects.upgrade_all(conn)  # raises, so the instance does not start, if a project cannot be upgraded
     tasks = []
     if os.environ.get("WORKBENCH_COLLECT", "0") == "1":
         tasks.append(asyncio.create_task(collect_forever()))
@@ -272,6 +275,12 @@ class ProjectIn(BaseModel):
     status: str | None = None
 
 
+@app.get("/auth/options")
+def auth_options() -> dict[str, Any]:
+    """Local single-user mode: no sign-in. The cloud entry answers this route itself (cloud.py)."""
+    return {"mode": "local", "api": 1, "providers": []}
+
+
 @app.get("/api/projects")
 def list_projects() -> list[dict[str, Any]]:
     return _registry(projects.list_all)
@@ -332,7 +341,10 @@ def _model_settings_user(request: Request) -> str:
     if (not request.client or request.client.host not in model_settings.LOCAL_HOSTS
             or request.url.hostname not in model_settings.LOCAL_HOSTS):
         raise HTTPException(status_code=403, detail="本地模型设置仅可从本机访问。")
-    if request.method != "GET" and request.headers.get("origin") != f"{request.url.scheme}://{request.url.netloc}":
+    # The desktop app talks to a local workbench from its own process, without an Origin; browsers cannot send its
+    # client header cross-origin (no CORS preflight is ever granted), so it cannot be used to forge this request.
+    same_origin = request.headers.get("origin") == f"{request.url.scheme}://{request.url.netloc}"
+    if request.method != "GET" and not same_origin and not auth.desktop_client(request.headers):
         raise HTTPException(status_code=403, detail="请求来源无效。")
     return ""
 

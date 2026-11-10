@@ -49,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
     claim = sub.add_parser("project-claim", help="assign one reviewed legacy project to a CloudBase user ID")
     claim.add_argument("project_id")
     claim.add_argument("user_id")
+    sub.add_parser("migrate", help="apply pending migrations to the registry and every project")
     sub.add_parser("init", help="apply migrations and load the seed types")
     ls = sub.add_parser("changesets")
     ls.add_argument("--status")
@@ -75,6 +76,12 @@ def main(argv: list[str] | None = None) -> int:
     reg = connect()
     projects.ensure_registry(reg)
     try:
+        if args.cmd == "migrate":
+            applied = projects.upgrade_all(reg)
+            for schema, versions in applied.items():
+                print(f"{schema}: {', '.join(versions)}")
+            print("已是最新。" if not applied else f"已升级 {len(applied)} 个 schema。")
+            return 0
         if args.cmd == "init" and args.project is None:
             print("项目目录已初始化。请在工作台创建研究项目。")
             return 0

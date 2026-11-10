@@ -1,9 +1,11 @@
 /* 本体工作台：三维星图 + 对话 + 审核。图数据来自服务端快照，前端只做增量合并、布局和视觉状态。 */
 import { ForceGraph3D, THREE, CSS2DRenderer, CSS2DObject, UnrealBloomPass } from "/static/vendor/graph3d.js";
 import { TYPES, LINKS, PROVENANCE, typeOf } from "/static/vocab.js";
+import { currentProject, go, request, routes, socket } from "/static/net.js";
 
-// Each workbench page is served at /p/<id>.
-const PROJECT = decodeURIComponent((location.pathname.match(/^\/p\/([^/]+)/) || [])[1]);
+// Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
+const PROJECT = currentProject();
+if (!PROJECT) go(routes.projects, { replace: true });
 const q = (url) => `${url}${url.includes("?") ? "&" : "?"}project=${encodeURIComponent(PROJECT)}`;
 
 // ------------------------------------------------------------------ vocabulary
@@ -687,7 +689,7 @@ async function refreshData() {
   btn.classList.add("spinning");
   btn.disabled = true;
   try {
-    const res = await fetch(q("/api/refresh"), { method: "POST" });
+    const res = await request(q("/api/refresh"), { method: "POST" });
     const r = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(r.detail || `刷新失败（${res.status}）`);
     lastRefresh = new Date();
@@ -939,7 +941,7 @@ const newsCache = new Map();
 async function loadNews(nodeId) {
   const hit = newsCache.get(nodeId);
   if (hit && Date.now() - hit.at < 60000) return hit.items;
-  const res = await fetch(q(`/api/nodes/${encodeURIComponent(nodeId)}/news`));
+  const res = await request(q(`/api/nodes/${encodeURIComponent(nodeId)}/news`));
   const items = res.ok ? await res.json() : [];
   newsCache.set(nodeId, { at: Date.now(), items });
   return items;
@@ -1023,7 +1025,7 @@ function evidenceSection(linkId) {
   const head = el("h3", {}, el("span", {}, "证据"), el("span", {}, "…"));
   const body = el("div", {}, el("p", { class: "news-empty" }, "读取中…"));
   wrap.append(head, body);
-  fetch(q(`/api/links/${encodeURIComponent(linkId)}/evidence`)).then((r) => r.json()).then((ev) => {
+  request(q(`/api/links/${encodeURIComponent(linkId)}/evidence`)).then((r) => r.json()).then((ev) => {
     head.lastChild.textContent = ev.evidence.length ? `强度 ${ev.strength.toFixed(2)}` : "无";
     if (!ev.evidence.length) {
       body.replaceChildren(el("p", { class: "news-empty" }, "还没有证据：两端都绑定数据后会计算联动，新闻同时提到两端时会记为共现。"));
@@ -1061,7 +1063,7 @@ function evidenceSection(linkId) {
 // ------------------------------------------------------------------ review
 
 async function post(url, okText) {
-  const res = await fetch(q(url), { method: "POST" });
+  const res = await request(q(url), { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     toast(body.detail || `操作失败（${res.status}）`, true);
@@ -1148,7 +1150,7 @@ for (const b of document.querySelectorAll(".panel-tabs [data-tab]")) b.addEventL
 
 async function loadReport() {
   try {
-    const res = await fetch(q(viewingAt ? `/api/report?at=${encodeURIComponent(viewingAt)}` : "/api/report"));
+    const res = await request(q(viewingAt ? `/api/report?at=${encodeURIComponent(viewingAt)}` : "/api/report"));
     const r = await res.json();
     report = r.report;
     reportState = r.state;
@@ -1281,7 +1283,7 @@ $("#rp-regen").addEventListener("click", async () => {
   reportState = { ...(reportState || {}), writing: true };
   reportStatus();
   try {
-    const res = await fetch(q("/api/report/regenerate"), { method: "POST" });
+    const res = await request(q("/api/report/regenerate"), { method: "POST" });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.detail || "研报生成失败", true); }
   } catch { toast("研报生成失败", true); }
   loadReport();
@@ -1299,7 +1301,7 @@ const pastCache = new Map();
 
 async function loadHistory() {
   try {
-    const h = await (await fetch(q("/api/history"))).json();
+    const h = await (await request(q("/api/history"))).json();
     commits = h.commits || [];
     reportVersions = h.reports || [];
   } catch { return; }
@@ -1353,7 +1355,7 @@ async function goTo(i) {
   const c = commits[i];
   let past = pastCache.get(c.id);
   if (!past) {
-    try { past = await (await fetch(q(`/api/graph?at=${encodeURIComponent(c.id)}`))).json(); }
+    try { past = await (await request(q(`/api/graph?at=${encodeURIComponent(c.id)}`))).json(); }
     catch { toast("读取历史状态失败", true); return; }
     pastCache.set(c.id, past);
   }
@@ -1438,7 +1440,7 @@ let models = null;         // what the model endpoint (magpie) offers
 const PROVIDERS = { claude: "Claude · 经 Claude Code 订阅", codex: "Codex · 经 Codex 订阅", anthropic: "Anthropic API" };
 
 async function loadModels() {
-  try { models = await (await fetch("/api/models")).json(); } catch { models = null; }
+  try { models = await (await request("/api/models")).json(); } catch { models = null; }
   renderModel();
 }
 
@@ -1584,7 +1586,7 @@ function setConn(state) {
 }
 function connect() {
   const sess = currentSession ? `?session=${encodeURIComponent(currentSession)}` : "";
-  ws = new WebSocket(q(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${sess}`));
+  ws = socket(q(`/ws${sess}`));
   ws.onopen = () => setConn("on");
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
@@ -1611,8 +1613,8 @@ function connect() {
   ws.onclose = async () => {
     setConn("off");
     setBusy(false);
-    const session = await fetch("/auth/session").catch(() => null);
-    if (session?.status === 401) location.replace("/login");
+    const session = await request("/auth/session").catch(() => null);
+    if (session?.status === 401) go(routes.login, { replace: true });
     else setTimeout(connect, 1500);
   };
 }
