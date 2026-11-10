@@ -2,7 +2,7 @@
 //! keeps one-time sign-in challenges in memory, and strips every credential out of what the web view sees.
 
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_DISPOSITION, CONTENT_TYPE};
 use reqwest::{Method, StatusCode};
@@ -18,6 +18,10 @@ pub const CLIENT_VERSION: &str = concat!("desktop/", env!("CARGO_PKG_VERSION"));
 const MAX_PATH: usize = 2048;
 const MAX_BODY: usize = 64 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+/// A server scaled to zero (CloudBase Cloud Run with no warm instance) answers 502/503/504 from its gateway
+/// until a container has started, which can take over a minute. Starting up keeps trying for this long.
+const WAKE_DEADLINE: Duration = Duration::from_secs(150);
+const WAKE_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -134,6 +138,7 @@ pub struct Backend {
     /// `None`: not read from the store yet.
     token: Mutex<Option<Option<String>>>,
     sms_challenge: Mutex<Option<String>>,
+    wake: (Duration, Duration),
 }
 
 impl Backend {
@@ -148,7 +153,20 @@ impl Backend {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|e| AppError::Internal(e.to_string()))?;
-        Ok(Self { http, server: RwLock::new(server), store, token: Mutex::new(None), sms_challenge: Mutex::new(None) })
+        Ok(Self {
+            http,
+            server: RwLock::new(server),
+            store,
+            token: Mutex::new(None),
+            sms_challenge: Mutex::new(None),
+            wake: (WAKE_DEADLINE, WAKE_INTERVAL),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_wake(mut self, deadline: Duration, interval: Duration) -> Self {
+        self.wake = (deadline, interval);
+        self
     }
 
     pub fn server(&self) -> String {
@@ -295,23 +313,40 @@ impl Backend {
         Ok((bytes, filename))
     }
 
-    /// Which kind of server this is and whether the stored session is still valid.
+    /// Which kind of server this is and whether the stored session is still valid. Waits for a server that
+    /// is still starting (gateway 502/503/504); any other failure is reported at once.
     pub async fn boot(&self) -> Result<BootState> {
+        let (deadline, interval) = self.wake;
+        let started = Instant::now();
+        let options = loop {
+            match self.options().await {
+                Err(AppError::Unavailable(status)) if started.elapsed() + interval < deadline => {
+                    log::info!("server answered {status} while starting; retrying");
+                    tokio::time::sleep(interval).await;
+                }
+                result => break result?,
+            }
+        };
+        let mode = options.mode.unwrap_or_else(|| "cloud".into());
+        let api = options.api.unwrap_or(0);
+        let authenticated = mode == "local" || (self.has_token() && self.session_valid().await?);
+        Ok(BootState { mode, api, providers: options.providers, authenticated })
+    }
+
+    async fn options(&self) -> Result<Options> {
         let response = self.send(Method::GET, "/auth/options", None).await?;
         let status = response.status();
         let (_, _, bytes) = Self::read(response).await?;
         if status == StatusCode::NOT_FOUND {
             return Err(AppError::user("该地址不是 ONTO-Research 工作台，或工作台版本过旧。"));
         }
+        if matches!(status, StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT) {
+            return Err(AppError::Unavailable(status.as_u16()));
+        }
         if !status.is_success() {
             return Err(AppError::User(format!("工作台暂时不可用（{}），请稍后重试。", status.as_u16())));
         }
-        let options: Options =
-            serde_json::from_slice(&bytes).map_err(|_| AppError::user("该地址不是 ONTO-Research 工作台。"))?;
-        let mode = options.mode.unwrap_or_else(|| "cloud".into());
-        let api = options.api.unwrap_or(0);
-        let authenticated = mode == "local" || (self.has_token() && self.session_valid().await?);
-        Ok(BootState { mode, api, providers: options.providers, authenticated })
+        serde_json::from_slice(&bytes).map_err(|_| AppError::user("该地址不是 ONTO-Research 工作台。"))
     }
 
     async fn session_valid(&self) -> Result<bool> {
@@ -592,6 +627,46 @@ mod tests {
             let foreign = MockServer::start().await;
             let backend = Backend::new(foreign.uri(), Arc::new(MemoryStore::default())).unwrap();
             assert!(backend.boot().await.is_err());
+        }
+
+        #[tokio::test]
+        async fn a_starting_server_is_waited_for_but_not_forever() {
+            let (server, waking, _) = backend().await;
+            let waking = waking.with_wake(Duration::from_secs(5), Duration::from_millis(10));
+            Mock::given(method("GET"))
+                .and(path("/auth/options"))
+                .respond_with(ResponseTemplate::new(503))
+                .up_to_n_times(2)
+                .with_priority(1)
+                .mount(&server)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/auth/options"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"mode": "local", "api": 1})))
+                .mount(&server)
+                .await;
+            assert!(waking.boot().await.unwrap().authenticated);
+            assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+            let (down, stuck, _) = backend().await;
+            let stuck = stuck.with_wake(Duration::from_millis(80), Duration::from_millis(10));
+            Mock::given(method("GET"))
+                .and(path("/auth/options"))
+                .respond_with(ResponseTemplate::new(502))
+                .mount(&down)
+                .await;
+            let error = stuck.boot().await.unwrap_err();
+            assert!(matches!(error, AppError::Unavailable(502)), "{error:?}");
+            assert!(error.to_string().contains("502"));
+
+            let (broken, failing, _) = backend().await;
+            Mock::given(method("GET"))
+                .and(path("/auth/options"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(1)
+                .mount(&broken)
+                .await;
+            assert!(failing.boot().await.is_err());
         }
 
         async fn backend_with_options(options: serde_json::Value) -> (MockServer, Backend, Arc<MemoryStore>) {

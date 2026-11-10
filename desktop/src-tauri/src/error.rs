@@ -12,6 +12,9 @@ pub enum AppError {
     Network,
     #[error("服务器响应超时，请稍后重试。")]
     Timeout,
+    /// The gateway answered 502/503/504: the server is down or still starting.
+    #[error("工作台暂时不可用（{0}），可能正在启动，请稍后重试。")]
+    Unavailable(u16),
     #[error("无法访问系统钥匙串，登录状态未能保存。")]
     Keychain,
     #[error("操作失败，请重试。")]
