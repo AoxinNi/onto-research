@@ -6,9 +6,13 @@ Three kinds, stored in onto_research.custom_sources and shared by every project 
 - json: an HTTP endpoint answering JSON. `path` leads to the list of points; `time` and `value` name the fields of
         each point (dot paths, or 0 / 1 when a point is a [time, value] pair).
 - csv:  an HTTP endpoint answering CSV with a header row; `time` and `value` name the columns.
+- mcp:  a tool on an MCP server the user connected (ontology.mcp_clients), called with fixed `arguments`; its
+        result is read like a json answer.
 
-A json/csv URL may hold {param} placeholders, e.g. https://example.org/api/{symbol}.json: each one becomes a param
-that a binding fills in, so one source serves many nodes. sync() mirrors the table into sources.SOURCES and
+A json/csv URL, or a string in an mcp tool's arguments, may hold {param} placeholders, e.g.
+https://example.org/api/{symbol}.json: each one becomes a param that a binding fills in, so one source serves many
+nodes. A json or mcp source without a `time` field records one value per fetch, stamped with the fetch time:
+that is how a tool that only answers "the price now" becomes a series. sync() mirrors the table into sources.SOURCES and
 news.CUSTOM_FEEDS, which is where the collector, the binding code and the agent look.
 
 Only the local workbench and the desktop app manage these: the server fetches the URLs, so on a shared cloud
@@ -32,13 +36,13 @@ from urllib.parse import quote, urlsplit
 import psycopg
 from psycopg.types.json import Jsonb
 
-from . import news, sources
+from . import mcp_clients, news, sources
 from .errors import OntologyError
 from .sources import FREQ_SECONDS, Obs, Source
 
 log = logging.getLogger("ontology.custom_sources")
 
-KINDS = ("rss", "json", "csv")
+KINDS = ("rss", "json", "csv", "mcp")
 PROVIDER = "custom"
 NAME = re.compile(r"[a-z][a-z0-9_]{1,39}")
 PARAM = re.compile(r"[a-z][a-z0-9_]{0,29}")
@@ -76,6 +80,31 @@ def url_params(url: str) -> list[str]:
     return out
 
 
+def argument_params(args: Any) -> list[str]:
+    """The {param} placeholders in the string values of an MCP tool's arguments, in order."""
+    out: list[str] = []
+    stack = [args]
+    while stack:
+        v = stack.pop(0)
+        if isinstance(v, dict):
+            stack[:0] = list(v.values())
+        elif isinstance(v, list):
+            stack[:0] = v
+        elif isinstance(v, str):
+            out += [p for p in url_params(v) if p not in out]
+    return out
+
+
+def fill_arguments(args: Any, p: dict[str, str]) -> Any:
+    if isinstance(args, dict):
+        return {k: fill_arguments(v, p) for k, v in args.items()}
+    if isinstance(args, list):
+        return [fill_arguments(v, p) for v in args]
+    if isinstance(args, str) and "{" in args:
+        return args.format(**p)
+    return args
+
+
 def _int(value: Any, what: str, low: int, high: int, default: int) -> int:
     if value in (None, ""):
         return default
@@ -100,13 +129,32 @@ def clean(defn: dict[str, Any], existing: str | None = None) -> dict[str, Any]:
                          or any(n == name for n, _, _ in news.FEEDS)):
         raise OntologyError(f"「{name}」已被内置数据源使用，请换一个标识")
     title = _text(defn.get("title"), "名称", 80)
-    url = _text(defn.get("url"), "地址", 1000)
-    parts = urlsplit(url)
-    if parts.scheme not in ("http", "https") or not parts.netloc or parts.username is not None:
-        raise OntologyError("地址应以 http:// 或 https:// 开头，且不带用户名密码")
     cfg = defn.get("config") or {}
     if not isinstance(cfg, dict):
         raise OntologyError("config 应为对象")
+    extra: dict[str, Any] = {}
+    if kind == "mcp":
+        server = str(cfg.get("server") or "").strip()
+        if not mcp_clients.NAME.fullmatch(server):
+            raise OntologyError("请选择一个 MCP 服务")
+        tool = _text(cfg.get("tool"), "工具名", 200)
+        args = cfg.get("arguments") or {}
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except ValueError:
+                raise OntologyError("工具参数应为 JSON 对象，例如 {\"symbol\": \"{symbol}\"}") from None
+        if not isinstance(args, dict) or len(json.dumps(args, ensure_ascii=False)) > 4000:
+            raise OntologyError("工具参数应为 JSON 对象，最多 4000 个字符")
+        url = f"mcp://{server}/{tool}"
+        params = argument_params(args)
+        extra = {"server": server, "tool": tool, "arguments": args}
+    else:
+        url = _text(defn.get("url"), "地址", 1000)
+        parts = urlsplit(url)
+        if parts.scheme not in ("http", "https") or not parts.netloc or parts.username is not None:
+            raise OntologyError("地址应以 http:// 或 https:// 开头，且不带用户名密码")
+        params = url_params(url)
     if kind == "rss":
         if url_params(url):
             raise OntologyError("RSS 地址不能带 {参数}")
@@ -115,12 +163,12 @@ def clean(defn: dict[str, Any], existing: str | None = None) -> dict[str, Any]:
             raise OntologyError(f"语言应为 {' / '.join(LANGS)}")
         return {"name": name, "kind": kind, "title": title, "url": url, "config": {"lang": lang}}
 
-    params = url_params(url)
     helps = cfg.get("params") or {}
     out = {
-        "path": _text(cfg.get("path"), "数据所在路径", 200, required=False) if kind == "json" else "",
-        "time": _text(cfg.get("time"), "时间字段", 100),
-        "value": _text(cfg.get("value"), "数值字段", 100),
+        **extra,
+        "path": _text(cfg.get("path"), "数据所在路径", 200, required=False) if kind != "csv" else "",
+        "time": _text(cfg.get("time"), "时间字段", 100, required=kind == "csv"),  # json/mcp: empty = the fetch time
+        "value": _text(cfg.get("value"), "数值字段", 100, required=kind != "mcp"),  # mcp: empty = the tool returns a bare number
         "time_format": str(cfg.get("time_format") or "auto"),
         "frequency": str(cfg.get("frequency") or "1d"),
         "poll_minutes": _int(cfg.get("poll_minutes"), "采集间隔（分钟）", 5, 10080, 60),
@@ -191,10 +239,28 @@ def parse_json(text: str, cfg: dict[str, Any]) -> list[Obs]:
         data = json.loads(text)
     except ValueError:
         raise OntologyError(f"返回的不是 JSON：{text.strip()[:80]!r}") from None
+    return read_points(data, cfg)
+
+
+def read_points(data: Any, cfg: dict[str, Any], now: datetime | None = None) -> list[Obs]:
+    """Points from parsed JSON. Without a time field, the one value at `path`.`value`, stamped with the fetch time."""
     try:
         items = _dig(data, cfg.get("path") or "")
     except (KeyError, IndexError, TypeError):
-        raise OntologyError(f"JSON 里找不到路径「{cfg.get('path')}」") from None
+        raise OntologyError(f"返回的数据里找不到路径「{cfg.get('path')}」") from None
+    if not cfg.get("time"):
+        if isinstance(items, list):
+            if not items:
+                raise OntologyError("返回的列表是空的")
+            items = items[-1]  # a list without times: its last element is the newest
+        if not cfg.get("value") and isinstance(items, dict) and len(items) == 1:
+            items = next(iter(items.values()))  # e.g. an MCP tool's {"result": 42}
+        try:
+            bare = isinstance(items, (int, float)) and not isinstance(items, bool)
+            value = _value(items if bare else _dig(items, cfg["value"]))  # a bare number needs no field
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise OntologyError(f"读不出数值字段「{cfg['value']}」；返回的是：{json.dumps(items, ensure_ascii=False)[:160]}") from None
+        return [Obs((now or datetime.now(UTC)).replace(second=0, microsecond=0), value)]
     if isinstance(items, dict):  # {time: value, ...}
         items = [[k, v] for k, v in items.items()]
     if not isinstance(items, list):
@@ -222,7 +288,7 @@ def parse_csv(text: str, cfg: dict[str, Any]) -> list[Obs]:
 
 @dataclass
 class HttpSeries(Source):
-    """A json or csv source defined on the 数据源 page."""
+    """A json, csv or mcp source defined on the 数据源 page."""
 
     kind: str = "json"
     url: str = ""
@@ -235,12 +301,28 @@ class HttpSeries(Source):
         return self.config.get("frequency") or "1d"
 
     def address(self, p: dict[str, str]) -> str:
+        if self.kind == "mcp":
+            return f"{self.url} {json.dumps(self.arguments(p), ensure_ascii=False)}"
         return self.url.format(**{k: quote(v, safe="") for k, v in p.items()})
 
+    def arguments(self, p: dict[str, str]) -> dict[str, Any]:
+        return fill_arguments(self.config.get("arguments") or {}, p)
+
     def fetch(self, p, since):
-        r = sources._get(self.address(p), provider=PROVIDER)
-        parse = parse_json if self.kind == "json" else parse_csv
-        return [o for o in parse(r.text, self.config) if o.ts >= since]
+        if self.kind == "mcp":
+            data, text, is_error = mcp_clients.call_sync(self.config["server"], self.config["tool"], self.arguments(p))
+            if is_error:
+                raise OntologyError(f"工具返回错误：{text[:300]}")
+            if data is None:  # plain text: a bare number is still a value
+                try:
+                    data = float(text.strip().replace(",", ""))
+                except ValueError:
+                    raise OntologyError(f"工具返回的不是 JSON，也不是数字：{text.strip()[:120]!r}") from None
+            points = read_points(data, self.config)
+        else:
+            r = sources._get(self.address(p), provider=PROVIDER)
+            points = (parse_json if self.kind == "json" else parse_csv)(r.text, self.config)
+        return [o for o in points if o.ts >= since]
 
     def describe(self):
         return super().describe() | {"custom": True, "kind": self.kind}

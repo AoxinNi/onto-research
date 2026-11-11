@@ -30,6 +30,15 @@ def _no_resolver_network(monkeypatch):
     monkeypatch.setattr(resolve, "_fetch", refuse)
 
 
+@pytest.fixture(autouse=True)
+def _own_mcp_servers(monkeypatch, tmp_path):
+    """Each test gets an empty MCP server list of its own, never the one in ~/.config."""
+    from ontology import mcp_clients
+
+    monkeypatch.setenv(mcp_clients.ENV, str(tmp_path / "mcp.json"))
+    mcp_clients._tools.clear()
+
+
 @pytest.fixture
 def conn():
     params = conninfo_to_dict(TEST_URL)

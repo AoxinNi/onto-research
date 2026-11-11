@@ -320,6 +320,29 @@ dialog.wide { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48
 .src-kind { font: 500 10.5px/1 var(--mono); color: var(--text-3); border: 1px solid var(--line-2); border-radius: 6px; padding: 3px 6px; }
 .src-url { margin: 0; font: 11px/1.5 var(--mono); color: var(--text-3); word-break: break-all; }
 .src-actions { display: flex; gap: 14px; align-items: center; }
+
+/* ------------------------------------------------------------------ external MCP servers */
+
+.ext-mcp { margin-top: 40px; }
+.ext-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 16px; }
+.ext-head .group-title { margin: 0; }
+.ext-head .hint { max-width: 760px; margin-top: 8px; }
+.ext-head .btn { flex-shrink: 0; }
+.ext-head .btn svg { width: 13px; height: 13px; }
+#ext-mcp-list .lede { margin: 0; grid-column: 1 / -1; }
+#mcp-form .field-note { margin: -6px 0 14px; }
+#mcp-form [hidden] { display: none !important; }
+.header-rows { display: flex; flex-direction: column; gap: 8px; }
+.header-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) auto; gap: 8px; align-items: center; }
+.add-header { align-self: flex-start; margin-top: 2px; }
+.check { display: flex; align-items: center; gap: 8px; margin: 0 0 14px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+.source-test .tool-desc { color: var(--text-3); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src-card .source-test { margin-top: 10px; }
+#source-form textarea { font: 12.5px/1.5 var(--mono); }
 @media (max-width: 560px) {
   .field-row, .field-row.three { grid-template-columns: 1fr; gap: 0; }
+  .ext-head { flex-direction: column; }
+  .header-row { grid-template-columns: 1fr auto; }
+  .header-row .h-value { grid-column: 1; }
 }

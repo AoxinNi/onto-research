@@ -65,7 +65,10 @@ def test_definitions_are_checked():
         ({**QUOTES, "url": "https://data.example/{Symbol}"}, "参数名"),
         ({**QUOTES, "kind": "xml"}, "类型"),
         ({**QUOTES, "config": {**QUOTES["config"], "frequency": "2d"}}, "频率"),
-        ({**QUOTES, "config": {**QUOTES["config"], "time": ""}}, "时间字段"),
+        ({**QUOTES, "kind": "csv", "config": {**QUOTES["config"], "time": ""}}, "时间字段"),  # json/mcp may omit it
+        ({**QUOTES, "kind": "mcp", "config": {"tool": "quote", "value": "price"}}, "MCP 服务"),
+        ({**QUOTES, "kind": "mcp", "config": {"server": "market", "tool": "quote", "value": "p",
+                                              "arguments": "{not json"}}, "JSON 对象"),
         ({"name": "feed", "kind": "rss", "title": "x", "url": "https://x.org/{a}.xml"}, "RSS"),
         ({"name": "coindesk", "kind": "rss", "title": "x", "url": "https://x.org/rss"}, "内置"),
     ]:

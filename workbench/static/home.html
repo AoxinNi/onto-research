@@ -136,6 +136,20 @@
         </div>
       </header>
 
+      <section class="ext-mcp" id="ext-mcp" hidden>
+        <div class="ext-head">
+          <div>
+            <h2 class="group-title">外部 MCP 服务 <small id="ext-mcp-count">0</small></h2>
+            <p class="hint">接入后，工作台的 agent 可以直接调用这些服务的工具；在「数据源」里还能把某个工具设成定时采集的数据源，用来盯市场。请求头只保存在本机的 <code id="ext-mcp-file">~/.config/onto-research/mcp.json</code>，页面上只显示末尾 4 位。</p>
+          </div>
+          <button type="button" class="btn primary" id="add-mcp-btn">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            添加 MCP 服务
+          </button>
+        </div>
+        <div class="grid sources" id="ext-mcp-list"></div>
+      </section>
+
       <div class="mcp-grid">
         <div class="mcp-side">
           <section class="panel-card">
@@ -197,6 +211,7 @@
         <select name="kind">
           <option value="json">数值序列 · JSON 接口</option>
           <option value="csv">数值序列 · CSV 文件</option>
+          <option value="mcp">数值序列 · MCP 工具</option>
           <option value="rss">新闻 · RSS / Atom</option>
         </select>
       </label>
@@ -204,8 +219,19 @@
         <label class="field"><span>名称</span><input name="title" required maxlength="80" placeholder="例如 国家统计局 CPI" autocomplete="off"></label>
         <label class="field"><span>标识</span><input name="name" required maxlength="40" pattern="[a-z][a-z0-9_]{1,39}" placeholder="例如 nbs_cpi" autocomplete="off" spellcheck="false"></label>
       </div>
-      <label class="field"><span>地址</span><input name="url" type="url" required maxlength="1000" placeholder="https://…" autocomplete="off" spellcheck="false"></label>
-      <p class="field-note" data-for="series">地址里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填，一个数据源就能服务多个节点。</p>
+      <label class="field" data-for="url"><span>地址</span><input name="url" type="url" required maxlength="1000" placeholder="https://…" autocomplete="off" spellcheck="false"></label>
+      <p class="field-note" data-for="http-series">地址里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填，一个数据源就能服务多个节点。</p>
+
+      <div data-for="mcp">
+        <div class="field-row">
+          <label class="field"><span>MCP 服务</span><select name="server"></select></label>
+          <label class="field"><span>工具</span><input name="tool" list="mcp-tool-names" maxlength="200" placeholder="先选服务，再选工具" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <datalist id="mcp-tool-names"></datalist>
+        <p class="field-note" id="mcp-tool-help" hidden></p>
+        <label class="field"><span>工具参数（JSON）</span><textarea name="arguments" rows="3" maxlength="4000" spellcheck="false" placeholder='例如 {"symbol": "{symbol}"}；不需要参数时留空'></textarea></label>
+        <p class="field-note">字符串里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填。采集器按「采集间隔」定时调用这个工具，记下它返回的数值。</p>
+      </div>
 
       <div data-for="rss">
         <label class="field"><span>语言</span>
@@ -214,7 +240,7 @@
       </div>
 
       <div data-for="series">
-        <label class="field" data-for="json"><span>数据所在路径</span><input name="path" maxlength="200" placeholder="例如 data.items；返回值本身就是列表时留空" autocomplete="off" spellcheck="false"></label>
+        <label class="field" data-for="path"><span>数据所在路径</span><input name="path" maxlength="200" placeholder="例如 data.items；返回值本身就是列表或数值时留空" autocomplete="off" spellcheck="false"></label>
         <div class="field-row">
           <label class="field"><span data-label="time">时间字段</span><input name="time" maxlength="100" placeholder="例如 date" autocomplete="off" spellcheck="false"></label>
           <label class="field"><span data-label="value">数值字段</span><input name="value" maxlength="100" placeholder="例如 close" autocomplete="off" spellcheck="false"></label>
@@ -250,6 +276,33 @@
         <span class="spacer"></span>
         <button type="button" class="btn" id="source-cancel">取消</button>
         <button type="submit" class="btn primary" id="source-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="mcp-dialog" class="wide">
+    <form method="dialog" id="mcp-form">
+      <h2 id="mcp-dialog-title">添加 MCP 服务</h2>
+      <div class="field-row">
+        <label class="field"><span>MCP 名称</span><input name="name" required maxlength="30" pattern="[a-z][a-z0-9_]{1,29}" placeholder="例如 market_data" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>MCP 类型</span>
+          <select name="transport"><option value="streamable_http">Streamable HTTP</option></select>
+        </label>
+      </div>
+      <p class="field-note">名称会出现在 agent 的工具名里，例如 <code>mcp__market_data__get_quote</code>：只能用小写字母、数字和下划线。</p>
+      <label class="field"><span>URL</span><input name="url" type="url" required maxlength="1000" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"></label>
+      <div class="field">
+        <span>请求头</span>
+        <div class="header-rows" id="mcp-headers"></div>
+        <button type="button" class="link add-header" id="mcp-add-header">+ 添加请求头</button>
+      </div>
+      <label class="check"><input type="checkbox" name="enabled" checked> 启用：agent 可以使用这个服务的工具</label>
+      <div class="source-test" id="mcp-test-box" hidden></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="mcp-test-btn">测试连接</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="mcp-cancel">取消</button>
+        <button type="submit" class="btn primary" id="mcp-save">保存</button>
       </div>
     </form>
   </dialog>

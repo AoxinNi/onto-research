@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ontology import collector, custom_sources, evidence, history, mcp_server, news, projects, reports, ths
+from ontology import collector, custom_sources, evidence, history, mcp_clients, mcp_server, news, projects, reports, ths
 from ontology import providers as providers_mod
 from ontology import sources as sources_mod
 from ontology.db import connect
@@ -533,6 +533,82 @@ async def delete_custom_source(name: str, request: Request) -> dict[str, Any]:
     """Bindings to it keep the points they have; the collector stops fetching them."""
     _manage_sources(request)
     await asyncio.to_thread(_custom, lambda reg: custom_sources.delete(reg, name))
+    return {"deleted": name}
+
+
+# ------------------------------------------------------------------ MCP servers the user connects
+# Their tools go to the agent, and "MCP 工具" data sources call them. Header values never come back to a page.
+
+
+def _manage_mcp(request: Request) -> None:
+    if projects.workspace_owner.get() or not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(status_code=403, detail="MCP 服务只能在本机的工作台或桌面应用里管理")
+
+
+def _mcp_call(fn: Callable[[], Any]) -> Any:
+    try:
+        return fn()
+    except OntologyError as e:
+        msg = str(e)
+        raise HTTPException(status_code=404 if msg.startswith("no MCP server") else 400, detail=msg) from None
+
+
+def _mcp_users(name: str) -> list[str]:
+    """Titles of the custom data sources that call this server."""
+    with connect() as reg:
+        return [c["title"] for c in custom_sources.list_all(reg) if c["kind"] == "mcp" and c["config"].get("server") == name]
+
+
+@app.get("/api/mcp/servers")
+async def list_mcp_servers(request: Request) -> dict[str, Any]:
+    _manage_mcp(request)
+    servers = _mcp_call(mcp_clients.list_servers)
+    users = await asyncio.to_thread(lambda: {s["name"]: _mcp_users(s["name"]) for s in servers})
+    return {"servers": [s | {"used_by": users[s["name"]]} for s in servers], "transports": mcp_clients.TRANSPORTS,
+            "file": str(mcp_clients.config_file())}
+
+
+@app.post("/api/mcp/servers")
+async def create_mcp_server(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    _manage_mcp(request)
+    return _mcp_call(lambda: mcp_clients.create(body))
+
+
+@app.post("/api/mcp/servers/test")
+async def test_mcp_server(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    """Connect with a definition (saved or not) and list its tools. Editing: `name` fills in the kept header values."""
+    _manage_mcp(request)
+    started = time.monotonic()
+    try:
+        before = mcp_clients.server(body["name"]) if body.get("name") else None
+        s = mcp_clients.clean(body.get("definition") or {}, before)
+        tools = await mcp_clients.fetch_tools(s)
+    except OntologyError as e:
+        return {"ok": False, "message": str(e)[:400], "seconds": round(time.monotonic() - started, 1)}
+    return {"ok": True, "tools": [{"name": t["name"], "description": t["description"][:200]} for t in tools],
+            "seconds": round(time.monotonic() - started, 1)}
+
+
+@app.get("/api/mcp/servers/{name}/tools")
+async def mcp_server_tools(name: str, request: Request) -> dict[str, Any]:
+    _manage_mcp(request)
+    try:
+        tools = await mcp_clients.tools(name, fresh=True)
+    except OntologyError as e:
+        raise HTTPException(status_code=404 if str(e).startswith("no MCP server") else 502, detail=str(e)) from None
+    return {"tools": tools}
+
+
+@app.put("/api/mcp/servers/{name}")
+async def update_mcp_server(name: str, body: dict[str, Any], request: Request) -> dict[str, Any]:
+    _manage_mcp(request)
+    return _mcp_call(lambda: mcp_clients.update(name, body))
+
+
+@app.delete("/api/mcp/servers/{name}")
+async def delete_mcp_server(name: str, request: Request) -> dict[str, Any]:
+    _manage_mcp(request)
+    _mcp_call(lambda: mcp_clients.delete(name))
     return {"deleted": name}
 
 

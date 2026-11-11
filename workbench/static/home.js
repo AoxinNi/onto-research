@@ -388,6 +388,7 @@ async function loadMcp() {
   sel.value = keep || new URLSearchParams(location.search).get("project") || "";
   showMcpConfig();
   renderNeeds();
+  loadExtMcp();
   const byName = new Map(mcpInfo.tools.map((t) => [t.name, t]));
   const seen = new Set(GROUPS.flatMap(([, ns]) => ns));
   const groups = [...GROUPS, ["其他", mcpInfo.tools.map((t) => t.name).filter((n) => !seen.has(n))]];
@@ -422,6 +423,138 @@ async function copyMcp(p) {
     toast(`已复制「${p.name}」的 Claude Code 接入命令`);
   } catch { toast("复制失败，可在「MCP 接入」页手动复制", true); }
 }
+
+// ------------------------------------------------------------------ external MCP servers
+
+// Servers the user connected for the agent and the collector. Header values stay on this machine; the page only
+// ever gets their last 4 characters, and sends `keep` for a header it leaves alone.
+async function loadExtMcp() {
+  let data;
+  try { data = await api("/api/mcp/servers"); }
+  catch { $("#ext-mcp").hidden = true; return; }  // a cloud workspace, or not this machine
+  $("#ext-mcp").hidden = false;
+  $("#ext-mcp-file").textContent = data.file;
+  $("#ext-mcp-count").textContent = String(data.servers.length);
+  $("#ext-mcp-list").replaceChildren(...(data.servers.length ? data.servers.map(extMcpCard)
+    : [el("p", { class: "lede" }, "还没有接入外部 MCP 服务。点「添加 MCP 服务」，填上名称、URL 和需要的请求头（例如 Authorization 或 X-Api-Key）。")]));
+}
+
+function savedDefinition(s) {
+  return { name: s.name, transport: s.transport, url: s.url, enabled: s.enabled,
+           headers: s.headers.map((h) => ({ key: h.key, keep: true })) };
+}
+
+function showMcpTest(box, r) {
+  const head = el("p", { class: `test-result ${r.ok ? "ok" : "bad"}` },
+    r.ok ? `连接正常 · ${r.tools.length} 个工具 · ${r.seconds}s` : `连接失败 · ${r.message}`);
+  box.replaceChildren(...[head, r.ok && r.tools.length > 0 && el("ul", {}, ...r.tools.map((t) =>
+    el("li", {}, el("span", {}, t.name), el("span", { class: "tool-desc", title: t.description }, t.description))))].filter(Boolean));
+  box.hidden = false;
+}
+
+async function testMcp(body, box, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "连接中…";
+  try { showMcpTest(box, await api("/api/mcp/servers/test", { method: "POST", body: JSON.stringify(body) })); }
+  catch (e) { showMcpTest(box, { ok: false, message: e.message }); }
+  btn.disabled = false; btn.textContent = label;
+}
+
+function extMcpCard(s, i) {
+  const box = el("div", { class: "source-test", hidden: true });
+  const test = el("button", { type: "button", class: "btn sm", onclick: () => testMcp({ name: s.name, definition: savedDefinition(s) }, box, test) }, "测试连接");
+  const remove = async () => {
+    const used = s.used_by.length ? `\n数据源 ${s.used_by.map((t) => `「${t}」`).join("、")} 用到了它，删除后这些数据源会采集失败。` : "";
+    if (!await confirmAction(`删除 MCP 服务「${s.name}」？保存的请求头也会一并删除。${used}`)) return;
+    try {
+      await api(`/api/mcp/servers/${encodeURIComponent(s.name)}`, { method: "DELETE" });
+      toast(`已删除「${s.name}」`);
+      loadExtMcp();
+    } catch (e) { toast(e.message, true); }
+  };
+  return el("article", { class: "src-card", style: `--i:${i}` },
+    el("div", { class: "src-head" },
+      el("h3", {}, s.name),
+      el("span", { class: `src-state ${s.enabled ? "ok" : "idle"}` }, s.enabled ? "已启用" : "已停用")),
+    el("div", { class: "src-actions" }, el("span", { class: "src-kind" }, "Streamable HTTP")),
+    el("p", { class: "src-url" }, s.url),
+    s.headers.length > 0 && el("ul", { class: "src-list" }, ...s.headers.map((h) => el("li", {},
+      el("span", {}, h.key), el("code", {}, h.hint)))),
+    el("p", { class: "src-note" }, s.enabled ? `agent 里的工具名：mcp__${s.name}__…` : "停用后 agent 看不到它的工具，数据源也不会调用它。"),
+    s.used_by.length > 0 && el("p", { class: "src-note" }, "数据源：", s.used_by.join("、")),
+    el("div", { class: "src-foot" },
+      el("span", { class: "src-actions" },
+        el("button", { type: "button", class: "link", onclick: () => openMcpDialog(s) }, "编辑"),
+        el("button", { type: "button", class: "link danger", onclick: remove }, "删除")),
+      test),
+    box,
+  );
+}
+
+const mcpDialog = $("#mcp-dialog");
+const mcpForm = $("#mcp-form");
+const mcpField = (name) => mcpForm.elements.namedItem(name);
+let editingMcp = null;
+
+function headerRow(h = null) {
+  const key = el("input", { class: "h-key", value: h?.key || "", placeholder: "名称，例如 Authorization", maxlength: "100",
+    autocomplete: "off", spellcheck: "false", "aria-label": "请求头名称" });
+  const value = el("input", { class: "h-value", type: "password", maxlength: "4000", autocomplete: "off", spellcheck: "false",
+    placeholder: h ? `已保存 ${h.hint}，留空则不变` : "值，例如 Bearer …", "aria-label": "请求头的值" });
+  const row = el("div", { class: "header-row" }, key, value,
+    el("button", { type: "button", class: "link danger", "aria-label": "删除这个请求头", onclick: () => row.remove() }, "删除"));
+  row.dataset.saved = h ? h.key : "";
+  return row;
+}
+
+function mcpDefinition() {
+  const headers = [...$("#mcp-headers").children].map((row) => {
+    const key = row.querySelector(".h-key").value.trim();
+    const value = row.querySelector(".h-value").value;
+    return { key, value, keep: !value && !!row.dataset.saved && row.dataset.saved.toLowerCase() === key.toLowerCase() };
+  });
+  return { name: mcpField("name").value.trim(), transport: mcpField("transport").value, url: mcpField("url").value.trim(),
+           enabled: mcpField("enabled").checked, headers };
+}
+
+function openMcpDialog(s = null) {
+  editingMcp = s;
+  mcpForm.reset();
+  $("#mcp-dialog-title").textContent = s ? `编辑「${s.name}」` : "添加 MCP 服务";
+  mcpField("name").value = s?.name || "";
+  mcpField("name").disabled = !!s;
+  mcpField("transport").value = s?.transport || "streamable_http";
+  mcpField("url").value = s?.url || "";
+  mcpField("enabled").checked = s ? s.enabled : true;
+  $("#mcp-headers").replaceChildren(...(s?.headers.length ? s.headers.map(headerRow) : [headerRow()]));
+  $("#mcp-test-box").hidden = true;
+  mcpDialog.showModal();
+}
+
+$("#add-mcp-btn").addEventListener("click", () => openMcpDialog());
+$("#mcp-add-header").addEventListener("click", () => {
+  const row = headerRow();
+  $("#mcp-headers").append(row);
+  row.querySelector(".h-key").focus();
+});
+$("#mcp-cancel").addEventListener("click", () => mcpDialog.close());
+$("#mcp-test-btn").addEventListener("click", () => {
+  if (!mcpField("url").checkValidity()) { mcpField("url").reportValidity(); return; }
+  testMcp({ name: editingMcp?.name, definition: mcpDefinition() }, $("#mcp-test-box"), $("#mcp-test-btn"));
+});
+mcpForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#mcp-save");
+  btn.disabled = true;
+  try {
+    const d = mcpDefinition();
+    await api(editingMcp ? `/api/mcp/servers/${encodeURIComponent(editingMcp.name)}` : "/api/mcp/servers",
+      { method: editingMcp ? "PUT" : "POST", body: JSON.stringify(d) });
+    mcpDialog.close();
+    toast(editingMcp ? `已保存「${d.name || editingMcp.name}」` : `已添加「${d.name}」，agent 下次对话时就能用它的工具`);
+    loadExtMcp();
+  } catch (err) { showMcpTest($("#mcp-test-box"), { ok: false, message: err.message }); }
+  btn.disabled = false;
+});
 
 // ------------------------------------------------------------------ data sources
 
@@ -515,7 +648,7 @@ function sourceCard(p, i) {
 
 // ------------------------------------------------------------------ custom data sources
 
-const KIND_NAMES = { json: "JSON 接口", csv: "CSV 文件", rss: "RSS 新闻" };
+const KIND_NAMES = { json: "JSON 接口", csv: "CSV 文件", rss: "RSS 新闻", mcp: "MCP 工具" };
 const FREQ_NAMES = { "5m": "5 分钟", "1h": "1 小时", "4h": "4 小时", "8h": "8 小时", "1d": "1 天", "1w": "1 周", "1mo": "1 月", "1q": "1 季度" };
 
 function customCard(c, i) {
@@ -523,8 +656,10 @@ function customCard(c, i) {
   const state = h.errors ? ["bad", `${h.errors} 条出错`] : h.series ? ["ok", "运行中"] : ["idle", "可用 · 未使用"];
   const cfg = c.config || {};
   const how = c.kind === "rss" ? `语言 ${cfg.lang === "en" ? "英文" : "中文"}`
-    : [c.kind === "json" && `路径 ${cfg.path || "（根）"}`, `时间 ${cfg.time}`, `数值 ${cfg.value}`,
-       FREQ_NAMES[cfg.frequency] || cfg.frequency, cfg.unit && `单位 ${cfg.unit}`].filter(Boolean).join(" · ");
+    : [c.kind !== "csv" && `路径 ${cfg.path || "（根）"}`, `时间 ${cfg.time || "采集时刻"}`, `数值 ${cfg.value || "返回值本身"}`,
+       FREQ_NAMES[cfg.frequency] || cfg.frequency, `每 ${cfg.poll_minutes} 分钟采集`, cfg.unit && `单位 ${cfg.unit}`].filter(Boolean).join(" · ");
+  const where = c.kind === "mcp"
+    ? `${cfg.server} → ${cfg.tool}${Object.keys(cfg.arguments || {}).length ? ` ${JSON.stringify(cfg.arguments)}` : ""}` : c.url;
   const remove = async () => {
     const kept = h.series ? `\n已有 ${h.series} 条数据流（${h.projects.join("、")}）会保留已采集的数据，但不再更新。` : "";
     if (!await confirmAction(`删除数据源「${c.title}」？${kept}`)) return;
@@ -539,7 +674,7 @@ function customCard(c, i) {
       el("h3", {}, c.title),
       el("span", { class: `src-state ${state[0]}` }, state[1])),
     el("div", { class: "src-actions" }, el("span", { class: "src-kind" }, KIND_NAMES[c.kind] || c.kind), el("code", { class: "src-url" }, c.name)),
-    el("p", { class: "src-url" }, c.url),
+    el("p", { class: "src-url" }, where),
     el("p", { class: "src-note" }, how),
     c.params.length > 0 && el("p", { class: "src-note" }, "绑定时填写：", ...c.params.flatMap((p, k) => [k ? "、" : "", el("code", {}, p)])),
     el("div", { class: "src-stats" },
@@ -567,14 +702,60 @@ function urlParams(url) {
 function syncSourceForm() {
   const kind = field("kind").value;
   const series = kind !== "rss";
-  for (const node of sourceForm.querySelectorAll("[data-for]")) {
-    const f = node.dataset.for;
-    node.hidden = f === "rss" ? series : f === "series" ? !series : f === "json" ? kind !== "json"
-      : f === "params" ? !urlParams(field("url").value).length : false;
-  }
+  const mcp = kind === "mcp";
+  const params = mcp ? urlParams(field("arguments").value) : urlParams(field("url").value);
+  const show = { rss: !series, series, mcp, url: !mcp, "http-series": kind === "json" || kind === "csv",
+                 path: kind !== "csv", params: params.length > 0 };
+  for (const node of sourceForm.querySelectorAll("[data-for]")) node.hidden = !show[node.dataset.for];
   sourceForm.querySelector('[data-label="time"]').textContent = kind === "csv" ? "时间列" : "时间字段";
   sourceForm.querySelector('[data-label="value"]').textContent = kind === "csv" ? "数值列" : "数值字段";
-  for (const n of ["time", "value"]) field(n).required = series;
+  field("time").placeholder = kind === "csv" ? "例如 date" : "例如 date；留空则记录采集时刻的数值";
+  field("value").placeholder = mcp ? "例如 price；工具只返回一个数时留空" : "例如 close";
+  field("test_params").placeholder = `例如 ${params.map((p) => `${p}=…`).join(" ") || "symbol=600519"}`;
+  field("url").required = !mcp;
+  field("time").required = kind === "csv";
+  field("value").required = kind === "json" || kind === "csv";
+  field("server").required = field("tool").required = mcp;
+}
+
+// The MCP servers connected on the MCP 接入 page, for the MCP 工具 kind; and the tools of the one picked.
+let sourceTools = [];
+async function fillServerChoices(chosen) {
+  const sel = field("server");
+  let servers = [];
+  try { servers = (await api("/api/mcp/servers")).servers; } catch { /* a cloud workspace has none */ }
+  sel.replaceChildren(el("option", { value: "" }, servers.length ? "选择一个服务" : "还没有接入 MCP 服务"),
+    ...servers.map((s) => el("option", { value: s.name }, `${s.name}${s.enabled ? "" : "（已停用）"}`)));
+  if (chosen && !servers.some((s) => s.name === chosen)) sel.append(el("option", { value: chosen }, `${chosen}（已删除）`));
+  sel.value = chosen || "";
+}
+async function loadSourceTools() {
+  const name = field("server").value;
+  const help = $("#mcp-tool-help");
+  sourceTools = [];
+  $("#mcp-tool-names").replaceChildren();
+  help.hidden = !name;
+  if (!name) return;
+  help.textContent = "正在读取工具列表…";
+  try {
+    sourceTools = (await api(`/api/mcp/servers/${encodeURIComponent(name)}/tools`)).tools;
+    $("#mcp-tool-names").replaceChildren(...sourceTools.map((t) => el("option", { value: t.name }, t.description.slice(0, 80))));
+    showToolHelp();
+  } catch (e) { help.textContent = e.message; }
+}
+function showToolHelp() {
+  const help = $("#mcp-tool-help");
+  const t = sourceTools.find((x) => x.name === field("tool").value.trim());
+  if (!t) { help.textContent = sourceTools.length ? `这个服务有 ${sourceTools.length} 个工具，在「工具」里选一个。` : ""; return; }
+  const props = t.input_schema?.properties || {};
+  const need = new Set(t.input_schema?.required || []);
+  const args = Object.keys(props).map((k) => `${k}${need.has(k) ? "（必填）" : ""}`);
+  const about = t.description.length > 240 ? `${t.description.slice(0, 240)}…` : t.description;
+  help.textContent = `${about}${args.length ? ` 参数：${args.join("、")}` : " 不需要参数。"}`;
+  if (!field("arguments").value.trim() && need.size) {  // a starting point: the required arguments, to be filled in
+    field("arguments").value = JSON.stringify(Object.fromEntries([...need].map((k) => [k, ""])));
+    syncSourceForm();
+  }
 }
 
 function openSourceDialog(c = null) {
@@ -584,16 +765,19 @@ function openSourceDialog(c = null) {
   $("#source-dialog-title").textContent = c ? `编辑「${c.title}」` : "添加数据源";
   field("kind").value = c?.kind || "json";
   field("kind").disabled = field("name").disabled = !!c;
-  for (const n of ["name", "title", "url"]) field(n).value = c?.[n] || "";
-  for (const n of ["path", "time", "value", "unit"]) field(n).value = cfg[n] || "";
+  for (const n of ["name", "title"]) field(n).value = c?.[n] || "";
+  field("url").value = c && c.kind !== "mcp" ? c.url : "";
+  for (const n of ["path", "time", "value", "unit", "tool"]) field(n).value = cfg[n] || "";
+  field("arguments").value = cfg.arguments && Object.keys(cfg.arguments).length ? JSON.stringify(cfg.arguments) : "";
   field("lang").value = cfg.lang || "zh";
   field("time_format").value = cfg.time_format || "auto";
   field("frequency").value = cfg.frequency || "1d";
   field("poll_minutes").value = cfg.poll_minutes || 60;
   field("backfill_days").value = cfg.backfill_days || 365;
-  $(".source-test").hidden = true;
+  sourceForm.querySelector(".source-test").hidden = true;
   syncSourceForm();
   sourceDialog.showModal();
+  fillServerChoices(cfg.server).then(() => { if (field("kind").value === "mcp") loadSourceTools(); });
 }
 
 function sourceDefinition() {
@@ -602,12 +786,13 @@ function sourceDefinition() {
   const config = kind === "rss" ? { lang: v("lang") } : {
     path: v("path"), time: v("time"), value: v("value"), time_format: v("time_format"), frequency: v("frequency"),
     unit: v("unit"), poll_minutes: Number(v("poll_minutes")) || 60, backfill_days: Number(v("backfill_days")) || 365,
+    ...(kind === "mcp" ? { server: v("server"), tool: v("tool"), arguments: v("arguments") } : {}),
   };
-  return { kind, name: v("name"), title: v("title"), url: v("url"), config };
+  return { kind, name: v("name"), title: v("title"), url: kind === "mcp" ? "" : v("url"), config };
 }
 
 function showTest(r) {
-  const box = $(".source-test");
+  const box = sourceForm.querySelector(".source-test");
   const head = el("p", { class: `test-result ${r.ok ? "ok" : "bad"}` });
   if (!r.ok) head.textContent = `读取失败 · ${r.message}`;
   else if (r.kind === "rss") head.textContent = `读到 ${r.count} 篇文章 · ${r.seconds}s`;
@@ -616,17 +801,25 @@ function showTest(r) {
     ? r.samples.map((x) => el("li", {}, el("span", {}, x.title), el("span", {}, x.published_at.slice(0, 10))))
     : r.samples.map((x) => el("li", {}, el("span", {}, x.ts.replace("T", " ").replace(/:00\+00:00$|\+00:00$/, "")),
         el("span", {}, Number(x.value).toLocaleString("zh-CN", { maximumFractionDigits: 6 }))));
-  box.replaceChildren(head, rows.length > 0 && el("ul", {}, ...rows));
+  box.replaceChildren(...[head, rows.length > 0 && el("ul", {}, ...rows)].filter(Boolean));
   box.hidden = false;
 }
 
-field("kind").addEventListener("change", syncSourceForm);
+field("kind").addEventListener("change", () => {
+  syncSourceForm();
+  if (field("kind").value === "mcp" && !sourceTools.length) loadSourceTools();
+});
 field("url").addEventListener("input", syncSourceForm);
+field("arguments").addEventListener("input", syncSourceForm);
+field("server").addEventListener("change", () => { field("tool").value = ""; loadSourceTools(); });
+field("tool").addEventListener("change", showToolHelp);
 $("#add-source-btn").addEventListener("click", () => openSourceDialog());
 $("#source-cancel").addEventListener("click", () => sourceDialog.close());
 $("#source-test-btn").addEventListener("click", async () => {
   const btn = $("#source-test-btn");
-  if (!field("url").checkValidity()) { field("url").reportValidity(); return; }
+  for (const n of field("kind").value === "mcp" ? ["server", "tool"] : ["url"]) {
+    if (!field(n).checkValidity()) { field(n).reportValidity(); return; }
+  }
   const params = Object.fromEntries(field("test_params").value.split(/[,，\s]+/).filter((x) => x.includes("="))
     .map((x) => x.split("=").map((y) => y.trim())));
   btn.disabled = true; btn.textContent = "测试中…";
