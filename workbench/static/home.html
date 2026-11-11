@@ -68,6 +68,12 @@
           <h1>数据源</h1>
           <p class="lede" id="sources-description">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里。</p>
         </div>
+        <div class="page-actions">
+          <button type="button" class="btn primary lg" id="add-source-btn" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            添加数据源
+          </button>
+        </div>
       </header>
       <div id="source-groups"><div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div></div>
     </section>
@@ -180,6 +186,70 @@
       <div class="dialog-actions">
         <button type="button" class="btn" value="cancel" id="dialog-cancel">取消</button>
         <button type="submit" class="btn primary" id="dialog-ok">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="source-dialog" class="wide">
+    <form method="dialog" id="source-form">
+      <h2 id="source-dialog-title">添加数据源</h2>
+      <label class="field"><span>类型</span>
+        <select name="kind">
+          <option value="json">数值序列 · JSON 接口</option>
+          <option value="csv">数值序列 · CSV 文件</option>
+          <option value="rss">新闻 · RSS / Atom</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label class="field"><span>名称</span><input name="title" required maxlength="80" placeholder="例如 国家统计局 CPI" autocomplete="off"></label>
+        <label class="field"><span>标识</span><input name="name" required maxlength="40" pattern="[a-z][a-z0-9_]{1,39}" placeholder="例如 nbs_cpi" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label class="field"><span>地址</span><input name="url" type="url" required maxlength="1000" placeholder="https://…" autocomplete="off" spellcheck="false"></label>
+      <p class="field-note" data-for="series">地址里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填，一个数据源就能服务多个节点。</p>
+
+      <div data-for="rss">
+        <label class="field"><span>语言</span>
+          <select name="lang"><option value="zh">中文</option><option value="en">英文</option></select>
+        </label>
+      </div>
+
+      <div data-for="series">
+        <label class="field" data-for="json"><span>数据所在路径</span><input name="path" maxlength="200" placeholder="例如 data.items；返回值本身就是列表时留空" autocomplete="off" spellcheck="false"></label>
+        <div class="field-row">
+          <label class="field"><span data-label="time">时间字段</span><input name="time" maxlength="100" placeholder="例如 date" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><span data-label="value">数值字段</span><input name="value" maxlength="100" placeholder="例如 close" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <div class="field-row three">
+          <label class="field"><span>时间格式</span>
+            <select name="time_format">
+              <option value="auto">自动识别</option>
+              <option value="iso">日期 / ISO 8601</option>
+              <option value="unix_s">Unix 秒</option>
+              <option value="unix_ms">Unix 毫秒</option>
+            </select>
+          </label>
+          <label class="field"><span>数据频率</span>
+            <select name="frequency">
+              <option value="5m">5 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option>
+              <option value="8h">8 小时</option><option value="1d" selected>1 天</option><option value="1w">1 周</option>
+              <option value="1mo">1 月</option><option value="1q">1 季度</option>
+            </select>
+          </label>
+          <label class="field"><span>单位</span><input name="unit" maxlength="20" placeholder="可选" autocomplete="off"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>采集间隔（分钟）</span><input name="poll_minutes" type="number" min="5" max="10080" value="60"></label>
+          <label class="field"><span>首次回补（天）</span><input name="backfill_days" type="number" min="1" max="36500" value="365"></label>
+        </div>
+        <label class="field" data-for="params"><span>测试用参数</span><input name="test_params" placeholder="例如 symbol=600519" autocomplete="off" spellcheck="false"></label>
+      </div>
+
+      <div class="source-test" hidden></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="source-test-btn">测试</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="source-cancel">取消</button>
+        <button type="submit" class="btn primary" id="source-save">保存</button>
       </div>
     </form>
   </dialog>

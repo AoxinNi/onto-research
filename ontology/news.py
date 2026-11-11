@@ -41,6 +41,14 @@ FEEDS = [
     ("bitcoinmagazine", "https://bitcoinmagazine.com/feed", "en"),
     ("panews", "https://www.panewslab.com/rss.xml?lang=zh", "zh"),
 ]
+# Feeds the user added on the 数据源 page (ontology.custom_sources keeps this in step with the registry).
+CUSTOM_FEEDS: list[tuple[str, str, str]] = []
+
+
+def all_feeds() -> list[tuple[str, str, str]]:
+    return FEEDS + CUSTOM_FEEDS
+
+
 FEED_POLL = timedelta(minutes=15)
 MAX_AGE = timedelta(days=3)       # older articles are stored but not sent for extraction
 BATCH = 8                         # articles per model call
@@ -123,10 +131,11 @@ def store_documents(conn: psycopg.Connection, feed: str, lang: str, docs: list[d
 
 def fetch_feeds(conn: psycopg.Connection, now: datetime, force: bool = False, timeout: float = 20) -> int:
     """Fetch due feeds (all of them with force) in parallel; store new articles. Returns how many were new."""
-    for name, url, lang in FEEDS:
+    feeds = all_feeds()
+    for name, url, lang in feeds:
         conn.execute("INSERT INTO feeds (name, url, lang) VALUES (%s, %s, %s) ON CONFLICT (name) DO UPDATE "
                      "SET url = EXCLUDED.url, lang = EXCLUDED.lang", (name, url, lang))
-    names = {n for n, _, _ in FEEDS}
+    names = {n for n, _, _ in feeds}
     due = [f for f in conn.execute("SELECT * FROM feeds ORDER BY name").fetchall()
            if f["name"] in names and (force or not f["last_fetch_at"] or now - f["last_fetch_at"] >= FEED_POLL)]
 

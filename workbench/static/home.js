@@ -429,12 +429,18 @@ const CATEGORY_ORDER = ["a-share", "macro", "news", "social", "internal"];
 
 async function loadSources() {
   try {
-    const { providers, categories } = await api("/api/sources");
+    const { providers, categories, custom = [], can_manage: canManage } = await api("/api/sources");
+    $("#add-source-btn").hidden = !canManage;
     const order = [...CATEGORY_ORDER, ...Object.keys(categories).filter((c) => !CATEGORY_ORDER.includes(c))];  // new ones still show
     const groups = order.map((c) => [c, providers.filter((p) => p.category === c)]).filter(([, ps]) => ps.length);
-    $("#source-groups").replaceChildren(...groups.map(([c, ps]) => el("section", {},
+    const mine = canManage && el("section", {},
+      el("h2", { class: "group-title" }, "我添加的", el("small", {}, String(custom.length))),
+      custom.length
+        ? el("div", { class: "grid sources" }, ...custom.map(customCard))
+        : el("p", { class: "lede" }, "还没有自己添加的数据源。点右上角「添加数据源」，接入 RSS 新闻或任意返回 JSON / CSV 的数据接口。"));
+    $("#source-groups").replaceChildren(...[mine, ...groups.map(([c, ps]) => el("section", {},
       el("h2", { class: "group-title" }, categories[c] || c, el("small", {}, String(ps.length))),
-      el("div", { class: "grid sources" }, ...ps.map(sourceCard)))));
+      el("div", { class: "grid sources" }, ...ps.map(sourceCard))))].filter(Boolean));
   } catch (e) {
     $("#source-groups").replaceChildren(el("p", { class: "lede" }, `数据源读取失败：${e.message}`));
   }
@@ -506,6 +512,143 @@ function sourceCard(p, i) {
     result,
   );
 }
+
+// ------------------------------------------------------------------ custom data sources
+
+const KIND_NAMES = { json: "JSON 接口", csv: "CSV 文件", rss: "RSS 新闻" };
+const FREQ_NAMES = { "5m": "5 分钟", "1h": "1 小时", "4h": "4 小时", "8h": "8 小时", "1d": "1 天", "1w": "1 周", "1mo": "1 月", "1q": "1 季度" };
+
+function customCard(c, i) {
+  const h = c.health;
+  const state = h.errors ? ["bad", `${h.errors} 条出错`] : h.series ? ["ok", "运行中"] : ["idle", "可用 · 未使用"];
+  const cfg = c.config || {};
+  const how = c.kind === "rss" ? `语言 ${cfg.lang === "en" ? "英文" : "中文"}`
+    : [c.kind === "json" && `路径 ${cfg.path || "（根）"}`, `时间 ${cfg.time}`, `数值 ${cfg.value}`,
+       FREQ_NAMES[cfg.frequency] || cfg.frequency, cfg.unit && `单位 ${cfg.unit}`].filter(Boolean).join(" · ");
+  const remove = async () => {
+    const kept = h.series ? `\n已有 ${h.series} 条数据流（${h.projects.join("、")}）会保留已采集的数据，但不再更新。` : "";
+    if (!await confirmAction(`删除数据源「${c.title}」？${kept}`)) return;
+    try {
+      await api(`/api/sources/custom/${encodeURIComponent(c.name)}`, { method: "DELETE" });
+      toast(`已删除「${c.title}」`);
+      loadSources();
+    } catch (e) { toast(e.message, true); }
+  };
+  return el("article", { class: "src-card", style: `--i:${i}` },
+    el("div", { class: "src-head" },
+      el("h3", {}, c.title),
+      el("span", { class: `src-state ${state[0]}` }, state[1])),
+    el("div", { class: "src-actions" }, el("span", { class: "src-kind" }, KIND_NAMES[c.kind] || c.kind), el("code", { class: "src-url" }, c.name)),
+    el("p", { class: "src-url" }, c.url),
+    el("p", { class: "src-note" }, how),
+    c.params.length > 0 && el("p", { class: "src-note" }, "绑定时填写：", ...c.params.flatMap((p, k) => [k ? "、" : "", el("code", {}, p)])),
+    el("div", { class: "src-stats" },
+      el("span", {}, c.kind === "rss" ? "项目 " : "数据流 ", el("b", {}, String(h.series))),
+      h.stale > 0 && el("span", {}, "陈旧 ", el("b", {}, String(h.stale))),
+      el("span", {}, "最近成功 ", el("b", {}, h.last_ok ? ago(h.last_ok) : "—"))),
+    h.last_error && el("p", { class: "src-error" }, `${h.last_error.series}：${h.last_error.error}`),
+    el("div", { class: "src-foot" },
+      el("span", { class: "src-actions" },
+        el("button", { type: "button", class: "link", onclick: () => openSourceDialog(c) }, "编辑"),
+        el("button", { type: "button", class: "link danger", onclick: remove }, "删除")),
+      el("span")),
+  );
+}
+
+const sourceDialog = $("#source-dialog");
+const sourceForm = $("#source-form");
+const field = (name) => sourceForm.elements.namedItem(name);
+let editingSource = null;  // the custom source being edited, or null when adding
+
+function urlParams(url) {
+  return [...new Set([...url.matchAll(/\{([a-z][a-z0-9_]*)\}/g)].map((m) => m[1]))];
+}
+
+function syncSourceForm() {
+  const kind = field("kind").value;
+  const series = kind !== "rss";
+  for (const node of sourceForm.querySelectorAll("[data-for]")) {
+    const f = node.dataset.for;
+    node.hidden = f === "rss" ? series : f === "series" ? !series : f === "json" ? kind !== "json"
+      : f === "params" ? !urlParams(field("url").value).length : false;
+  }
+  sourceForm.querySelector('[data-label="time"]').textContent = kind === "csv" ? "时间列" : "时间字段";
+  sourceForm.querySelector('[data-label="value"]').textContent = kind === "csv" ? "数值列" : "数值字段";
+  for (const n of ["time", "value"]) field(n).required = series;
+}
+
+function openSourceDialog(c = null) {
+  editingSource = c;
+  sourceForm.reset();
+  const cfg = c?.config || {};
+  $("#source-dialog-title").textContent = c ? `编辑「${c.title}」` : "添加数据源";
+  field("kind").value = c?.kind || "json";
+  field("kind").disabled = field("name").disabled = !!c;
+  for (const n of ["name", "title", "url"]) field(n).value = c?.[n] || "";
+  for (const n of ["path", "time", "value", "unit"]) field(n).value = cfg[n] || "";
+  field("lang").value = cfg.lang || "zh";
+  field("time_format").value = cfg.time_format || "auto";
+  field("frequency").value = cfg.frequency || "1d";
+  field("poll_minutes").value = cfg.poll_minutes || 60;
+  field("backfill_days").value = cfg.backfill_days || 365;
+  $(".source-test").hidden = true;
+  syncSourceForm();
+  sourceDialog.showModal();
+}
+
+function sourceDefinition() {
+  const kind = field("kind").value;
+  const v = (n) => field(n).value.trim();
+  const config = kind === "rss" ? { lang: v("lang") } : {
+    path: v("path"), time: v("time"), value: v("value"), time_format: v("time_format"), frequency: v("frequency"),
+    unit: v("unit"), poll_minutes: Number(v("poll_minutes")) || 60, backfill_days: Number(v("backfill_days")) || 365,
+  };
+  return { kind, name: v("name"), title: v("title"), url: v("url"), config };
+}
+
+function showTest(r) {
+  const box = $(".source-test");
+  const head = el("p", { class: `test-result ${r.ok ? "ok" : "bad"}` });
+  if (!r.ok) head.textContent = `读取失败 · ${r.message}`;
+  else if (r.kind === "rss") head.textContent = `读到 ${r.count} 篇文章 · ${r.seconds}s`;
+  else head.textContent = `读到 ${r.count} 个数据点 · ${FREQ_NAMES[r.frequency] || r.frequency} · ${r.seconds}s`;
+  const rows = !r.ok ? [] : r.kind === "rss"
+    ? r.samples.map((x) => el("li", {}, el("span", {}, x.title), el("span", {}, x.published_at.slice(0, 10))))
+    : r.samples.map((x) => el("li", {}, el("span", {}, x.ts.replace("T", " ").replace(/:00\+00:00$|\+00:00$/, "")),
+        el("span", {}, Number(x.value).toLocaleString("zh-CN", { maximumFractionDigits: 6 }))));
+  box.replaceChildren(head, rows.length > 0 && el("ul", {}, ...rows));
+  box.hidden = false;
+}
+
+field("kind").addEventListener("change", syncSourceForm);
+field("url").addEventListener("input", syncSourceForm);
+$("#add-source-btn").addEventListener("click", () => openSourceDialog());
+$("#source-cancel").addEventListener("click", () => sourceDialog.close());
+$("#source-test-btn").addEventListener("click", async () => {
+  const btn = $("#source-test-btn");
+  if (!field("url").checkValidity()) { field("url").reportValidity(); return; }
+  const params = Object.fromEntries(field("test_params").value.split(/[,，\s]+/).filter((x) => x.includes("="))
+    .map((x) => x.split("=").map((y) => y.trim())));
+  btn.disabled = true; btn.textContent = "测试中…";
+  try {
+    showTest(await api("/api/sources/custom/test", { method: "POST", body: JSON.stringify({ definition: sourceDefinition(), params }) }));
+  } catch (e) { showTest({ ok: false, message: e.message }); }
+  btn.disabled = false; btn.textContent = "测试";
+});
+sourceForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#source-save");
+  btn.disabled = true;
+  try {
+    const d = sourceDefinition();
+    await api(editingSource ? `/api/sources/custom/${encodeURIComponent(editingSource.name)}` : "/api/sources/custom",
+      { method: editingSource ? "PUT" : "POST", body: JSON.stringify(d) });
+    sourceDialog.close();
+    toast(editingSource ? `已保存「${d.title}」` : `已添加「${d.title}」`);
+    loadSources();
+  } catch (err) { showTest({ ok: false, message: err.message }); }
+  btn.disabled = false;
+});
 
 // ------------------------------------------------------------------ model settings
 

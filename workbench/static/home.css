@@ -302,3 +302,24 @@ dialog h2 { margin: 0 0 20px; font-size: 18px; font-weight: 600; letter-spacing:
 .server-panel .login-form { margin-top: 14px; }
 .field-note { margin: -6px 0 0; color: var(--text-3); font-size: 12px; }
 html.reduced .boot-status::before { animation: none; }
+
+/* ------------------------------------------------------------------ custom sources */
+
+dialog.wide { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48px); overflow-y: auto; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.field-row.three { grid-template-columns: 1fr 1fr 1fr; }
+.field-row .field { min-width: 0; }
+#source-form .field-note { margin: -6px 0 14px; }
+#source-form [hidden] { display: none !important; }
+.dialog-actions .spacer { flex: 1; }
+.source-test { margin-top: 4px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); }
+.source-test .test-result { margin-bottom: 6px; }
+.source-test ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font: 11px/1.5 var(--mono); color: var(--text-2); }
+.source-test li { display: flex; justify-content: space-between; gap: 12px; }
+.source-test li span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.src-kind { font: 500 10.5px/1 var(--mono); color: var(--text-3); border: 1px solid var(--line-2); border-radius: 6px; padding: 3px 6px; }
+.src-url { margin: 0; font: 11px/1.5 var(--mono); color: var(--text-3); word-break: break-all; }
+.src-actions { display: flex; gap: 14px; align-items: center; }
+@media (max-width: 560px) {
+  .field-row, .field-row.three { grid-template-columns: 1fr; gap: 0; }
+}

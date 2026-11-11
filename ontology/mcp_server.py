@@ -15,7 +15,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import evidence, localfiles, news, projects, resolve, ths, xsearch
+from . import custom_sources, evidence, localfiles, news, projects, resolve, ths, xsearch
 from .library import Library
 from .manuscripts import Manuscripts
 from .sources import SOURCES
@@ -598,6 +598,8 @@ def use_project(project_id: str) -> dict[str, Any]:
 
 def main() -> None:
     load_env_file()  # DATABASE_URL, THS_API_KEY, the model gateway… come from the project's .env
+    with connect() as conn:
+        custom_sources.sync_quietly(conn)  # sources added on the workbench's 数据源 page
     store()
     server.run("stdio")
 

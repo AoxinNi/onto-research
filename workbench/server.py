@@ -16,7 +16,7 @@ import time
 from datetime import UTC, datetime, timedelta
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import anthropic
@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ontology import collector, evidence, history, mcp_server, news, projects, reports, ths
+from ontology import collector, custom_sources, evidence, history, mcp_server, news, projects, reports, ths
 from ontology import providers as providers_mod
 from ontology import sources as sources_mod
 from ontology.db import connect
@@ -51,6 +51,7 @@ async def lifespan(_app: FastAPI):
             projects.ensure_registry(conn)  # an operator runs `python -m ontology.cli migrate` instead
         else:
             projects.upgrade_all(conn)  # raises, so the instance does not start, if a project cannot be upgraded
+        custom_sources.sync_quietly(conn)  # sources added on the 数据源 page
     tasks = []
     if os.environ.get("WORKBENCH_COLLECT", "0") == "1":
         tasks.append(asyncio.create_task(collect_forever()))
@@ -68,6 +69,7 @@ async def collect_forever() -> None:
         try:
             with connect() as reg:
                 ids = projects.active_ids(reg)
+                custom_sources.sync_quietly(reg)  # pick up sources changed by another process (CLI, MCP)
         except Exception:
             log.exception("could not read the project list")
             ids = []
@@ -419,11 +421,25 @@ async def test_model_settings(request: Request) -> dict:
 
 
 def _source_health() -> dict[str, dict[str, Any]]:
-    """Per provider, across every active project: series bound, how many are failing or stale, last success."""
+    """Per provider, across every active project: series bound, how many are failing or stale, last success.
+    Each custom source also gets its own entry, under "source:<name>"."""
     health: dict[str, dict[str, Any]] = {}
+    custom_feeds = {n for n, _, _ in news.CUSTOM_FEEDS}
 
     def slot(pid: str) -> dict[str, Any]:
         return health.setdefault(pid, {"series": 0, "errors": 0, "stale": 0, "last_ok": None, "last_error": None, "projects": set()})
+
+    def tally(keys: list[str], project: str, status: str, stale: bool, last_ok: str | None, error: dict | None) -> None:
+        for key in keys:
+            h = slot(key)
+            h["series"] += 1
+            h["projects"].add(project)
+            h["errors"] += status == "error"
+            h["stale"] += stale and status != "error"
+            if status == "ok" and last_ok and (h["last_ok"] is None or last_ok > h["last_ok"]):
+                h["last_ok"] = last_ok
+            if status == "error" and error:
+                h["last_error"] = error
 
     with connect() as reg:
         ids = projects.active_ids(reg)
@@ -432,30 +448,23 @@ def _source_health() -> dict[str, dict[str, Any]]:
             store = OntologyStore(c, actor="human")
             for nid, items in store.series.node_data().items():
                 for d in items:
-                    prov = sources_mod.SOURCES[d["source"]].provider if d["source"] in sources_mod.SOURCES else "internal"
-                    h = slot(prov)
-                    h["series"] += 1
-                    h["projects"].add(project)
-                    h["errors"] += d["status"] == "error"
-                    h["stale"] += bool(d.get("stale")) and d["status"] != "error"
-                    if d["status"] == "ok" and d["last_fetch_at"] and (h["last_ok"] is None or d["last_fetch_at"] > h["last_ok"]):
-                        h["last_ok"] = d["last_fetch_at"]
-                    if d["status"] == "error" and d["last_error"]:
-                        h["last_error"] = {"series": d["label"], "error": d["last_error"]}
+                    src = sources_mod.SOURCES.get(d["source"])
+                    prov = src.provider if src else "internal"
+                    keys = [prov] + ([f"source:{d['source']}"] if prov == custom_sources.PROVIDER else [])
+                    tally(keys, project, d["status"], bool(d.get("stale")), d["last_fetch_at"],
+                          {"series": d["label"], "error": d["last_error"]} if d["last_error"] else None)
             feeds = c.execute("SELECT name, status, last_fetch_at, last_error FROM feeds").fetchall()
             for f in feeds:
-                h = slot("rss")
-                h["series"] += 1
-                h["projects"].add(project)
-                h["errors"] += f["status"] == "error"
                 ts = f["last_fetch_at"].isoformat() if f["last_fetch_at"] else None
-                if f["status"] == "ok" and ts and (h["last_ok"] is None or ts > h["last_ok"]):
-                    h["last_ok"] = ts
-                if f["status"] == "error":
-                    h["last_error"] = {"series": f"RSS · {f['name']}", "error": f["last_error"]}
+                keys = [f"source:{f['name']}"] if f["name"] in custom_feeds else ["rss"]
+                tally(keys, project, f["status"], False, ts,
+                      {"series": f"RSS · {f['name']}", "error": f["last_error"]} if f["last_error"] else None)
     for h in health.values():
         h["projects"] = sorted(h["projects"])
     return health
+
+
+EMPTY_HEALTH = {"series": 0, "errors": 0, "stale": 0, "last_ok": None, "last_error": None, "projects": []}
 
 
 @app.get("/api/sources")
@@ -467,9 +476,64 @@ async def list_sources_page() -> dict[str, Any]:
         details = p.describe()
         if projects.workspace_owner.get():
             details.pop("key_hint", None)
-        out.append(details | {"sources": srcs, "health": health.get(p.id, {"series": 0, "errors": 0, "stale": 0,
-                                                                                 "last_ok": None, "last_error": None, "projects": []})})
-    return {"providers": out, "categories": providers_mod.CATEGORIES}
+        out.append(details | {"sources": srcs, "health": health.get(p.id, EMPTY_HEALTH)})
+    can_manage = not projects.workspace_owner.get()
+    custom = []
+    if can_manage:
+        with connect() as reg:
+            custom = [c | {"health": health.get(f"source:{c['name']}", EMPTY_HEALTH)} for c in custom_sources.list_all(reg)]
+    return {"providers": out, "categories": providers_mod.CATEGORIES, "custom": custom, "can_manage": can_manage}
+
+
+# ------------------------------------------------------------------ custom data sources
+# Defined before /api/sources/{provider_id}/… so that "custom" is not taken for a provider id.
+
+
+def _manage_sources(request: Request) -> None:
+    """Custom sources make this server fetch the URLs they name: only the local workbench and desktop app."""
+    if projects.workspace_owner.get() or not request.client or request.client.host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        raise HTTPException(status_code=403, detail="自定义数据源只能在本机的工作台或桌面应用里管理")
+
+
+def _custom(fn: Callable[[psycopg.Connection], Any]) -> Any:
+    try:
+        with connect() as reg:
+            return fn(reg)
+    except OntologyError as e:
+        msg = str(e)
+        raise HTTPException(status_code=404 if msg.startswith("no custom source") else 400, detail=msg) from None
+
+
+@app.post("/api/sources/custom")
+async def create_custom_source(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    _manage_sources(request)
+    return await asyncio.to_thread(_custom, lambda reg: custom_sources.create(reg, body))
+
+
+@app.post("/api/sources/custom/test")
+async def test_custom_source(body: dict[str, Any], request: Request) -> dict[str, Any]:
+    """Fetch a definition once, saved or not, and show what came back."""
+    _manage_sources(request)
+    started = time.monotonic()
+    try:
+        out = await asyncio.to_thread(custom_sources.test, body.get("definition") or {}, body.get("params") or {})
+    except OntologyError as e:
+        return {"ok": False, "message": str(e)[:400], "seconds": round(time.monotonic() - started, 1)}
+    return {"ok": True, **out, "seconds": round(time.monotonic() - started, 1)}
+
+
+@app.put("/api/sources/custom/{name}")
+async def update_custom_source(name: str, body: dict[str, Any], request: Request) -> dict[str, Any]:
+    _manage_sources(request)
+    return await asyncio.to_thread(_custom, lambda reg: custom_sources.update(reg, name, body))
+
+
+@app.delete("/api/sources/custom/{name}")
+async def delete_custom_source(name: str, request: Request) -> dict[str, Any]:
+    """Bindings to it keep the points they have; the collector stops fetching them."""
+    _manage_sources(request)
+    await asyncio.to_thread(_custom, lambda reg: custom_sources.delete(reg, name))
+    return {"deleted": name}
 
 
 def _test_provider(provider_id: str) -> dict[str, Any]:
