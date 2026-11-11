@@ -30,7 +30,7 @@ from .errors import OntologyError
 
 ENV = "WORKBENCH_LOCAL_MCP_SERVERS"
 TRANSPORTS = {"streamable_http": "Streamable HTTP"}
-NAME = re.compile(r"[a-z][a-z0-9_]{1,29}")
+NAME = re.compile(r"[a-z][a-z0-9_-]{1,29}")
 HEADER = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}")
 MAX_HEADERS = 20
 CALL_SECONDS = 120
@@ -108,7 +108,7 @@ def clean(defn: dict[str, Any], before: dict[str, Any] | None = None) -> dict[st
     """A checked server definition. A header sent with keep=true and no value keeps its saved value."""
     name = before["name"] if before else str(defn.get("name") or "").strip()
     if not NAME.fullmatch(name):
-        raise OntologyError("名称只能用小写字母、数字和下划线，以字母开头，2 到 30 个字符")
+        raise OntologyError("名称只能用小写字母、数字、下划线和连字符，以字母开头，2 到 30 个字符")
     transport = str(defn.get("transport") or "streamable_http")
     if transport not in TRANSPORTS:
         raise OntologyError(f"类型应为 {' / '.join(TRANSPORTS.values())}")

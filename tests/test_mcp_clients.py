@@ -111,6 +111,8 @@ def test_servers_are_saved_locally_with_header_values_masked(tmp_path):
         with pytest.raises(OntologyError, match=msg):
             mcp_clients.create(bad)
 
+    assert mcp_clients.create({"name": "gildata-finance-data", "url": "https://x.org/mcp"})["name"] == "gildata-finance-data"
+    mcp_clients.delete("gildata-finance-data")
     mcp_clients.delete("market")
     assert mcp_clients.list_servers() == []
     with pytest.raises(OntologyError, match="no MCP server"):

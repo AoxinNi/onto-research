@@ -284,12 +284,12 @@
     <form method="dialog" id="mcp-form">
       <h2 id="mcp-dialog-title">添加 MCP 服务</h2>
       <div class="field-row">
-        <label class="field"><span>MCP 名称</span><input name="name" required maxlength="30" pattern="[a-z][a-z0-9_]{1,29}" placeholder="例如 market_data" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>MCP 名称</span><input name="name" required maxlength="30" pattern="[a-z][a-z0-9_\-]{1,29}" placeholder="例如 market_data" autocomplete="off" spellcheck="false"></label>
         <label class="field"><span>MCP 类型</span>
           <select name="transport"><option value="streamable_http">Streamable HTTP</option></select>
         </label>
       </div>
-      <p class="field-note">名称会出现在 agent 的工具名里，例如 <code>mcp__market_data__get_quote</code>：只能用小写字母、数字和下划线。</p>
+      <p class="field-note">名称会出现在 agent 的工具名里，例如 <code>mcp__market_data__get_quote</code>：只能用小写字母、数字、下划线和连字符（-）。</p>
       <label class="field"><span>URL</span><input name="url" type="url" required maxlength="1000" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"></label>
       <div class="field">
         <span>请求头</span>
