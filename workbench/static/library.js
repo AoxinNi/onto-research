@@ -6,6 +6,7 @@
 
 import { KINDS, STANCES, typeOf } from "/static/vocab.js";
 import { confirmAction, download, onFileDrop, openExternal, pickAndUpload, request } from "/static/net.js";
+import { createReading } from "/static/reading.js";
 
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -59,6 +60,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     return body;
   }
   const fail = (e) => toast(e.message || String(e), true);
+  const paperReading = createReading({ api, q, toast, fail });
 
   // ---------------------------------------------------------------- skeleton
 
@@ -269,7 +271,8 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     try {
       const data = await api(`/api/library/${encodeURIComponent(id)}`);
       const keepTab = view.kind === "item" && view.id === id ? view.tab : null;
-      view = { kind: "item", id, data, tab: tab || keepTab || (data.files.length ? "text" : "info"), text: null };
+      const pdf = data.files.some((f) => f.media_type === "application/pdf");
+      view = { kind: "item", id, data, tab: tab || keepTab || (pdf ? "reading" : data.files.length ? "text" : "info"), text: null };
       setContext({ item_id: id });
       renderSide();
       renderItem();
@@ -278,7 +281,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
 
   function renderItem() {
     const it = view.data;
-    const tabs = [["text", "正文"], ["excerpts", `摘录 ${it.excerpts.length || ""}`], ["groundings", `依据 ${it.groundings.length || ""}`],
+    const tabs = [["reading", "精读"], ["text", "原文"], ["excerpts", `摘录 ${it.excerpts.length || ""}`], ["groundings", `依据 ${it.groundings.length || ""}`],
                   ["notes", `笔记 ${it.notes.length || ""}`], ["info", "信息"]];
     const reading = el("select", { "aria-label": "阅读状态", onchange: () => patch({ reading: reading.value }) },
       ...Object.entries(READING).map(([k, v]) => el("option", { value: k, selected: it.reading === k }, v)));
@@ -300,7 +303,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     const body = el("div", { class: "item-body" });
     main.replaceChildren(head, body);
     selBar.hidden = true;
-    ({ text: renderText, excerpts: renderExcerpts, groundings: renderGroundings, notes: renderItemNotes, info: renderInfo })[view.tab](body);
+    ({ reading: (b) => paperReading.render(b, it), text: renderText, excerpts: renderExcerpts, groundings: renderGroundings, notes: renderItemNotes, info: renderInfo })[view.tab](body);
   }
 
   async function patch(changes) {
@@ -728,6 +731,8 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       load();
       // Re-draw the open item or note only when that cannot lose anything: no dialog, nothing being typed, and
       // not the reader (which would jump back to the top). Changes made on this page re-draw by themselves.
+      // The reading tab fetches its own state and redraws only when the job moved on.
+      if (view.kind === "item" && view.tab === "reading") { if (!msg.item || msg.item === view.id) paperReading.refresh(view.id); return; }
       const busy = main.querySelector(".ground-dlg, .cite-pick") || main.contains(document.activeElement);
       if (busy) return;
       if (view.kind === "item" && view.tab !== "text" && (!msg.item || msg.item === view.id)) openItem(view.id);

@@ -133,9 +133,9 @@ def test_a_project_from_before_the_library_gets_its_tables_at_startup(conn):
     projects.ensure_registry(conn)
     projects.create(conn, "文献库之前的项目", project_id="pre-library")
     s = '"onto_research_p_pre-library"'
-    conn.execute(f"DROP TABLE {s}.groundings, {s}.notes, {s}.excerpts, {s}.library_chunks, {s}.library_files, {s}.library_items")
-    conn.execute(f"DELETE FROM {s}.schema_migrations WHERE version IN ('010_library', '011_groundings')")
+    conn.execute(f"DROP TABLE {s}.paper_digests, {s}.groundings, {s}.notes, {s}.excerpts, {s}.library_chunks, {s}.library_files, {s}.library_items")
+    conn.execute(f"DELETE FROM {s}.schema_migrations WHERE version IN ('010_library', '011_groundings', '013_paper_digests')")
 
-    assert projects.upgrade_all(conn) == {"onto_research_p_pre-library": ["010_library", "011_groundings"]}
-    for table in ("library_items", "excerpts", "notes", "groundings"):
+    assert projects.upgrade_all(conn) == {"onto_research_p_pre-library": ["010_library", "011_groundings", "013_paper_digests"]}
+    for table in ("library_items", "excerpts", "notes", "groundings", "paper_digests"):
         assert has_table(conn, f"{s}.{table}")

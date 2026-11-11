@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ontology import collector, custom_sources, evidence, history, mcp_clients, mcp_server, news, projects, reports, ths
+from ontology import collector, custom_sources, evidence, history, mcp_clients, mcp_server, mineru, news, projects, reports, ths
 from ontology import providers as providers_mod
 from ontology import sources as sources_mod
 from ontology.db import connect
@@ -624,6 +624,7 @@ def _test_provider(provider_id: str) -> dict[str, Any]:
     checks = {
         "fred": lambda: f"DGS10 最新 {sources_mod.source('fred').fetch({'series': 'DGS10'}, now - timedelta(days=14))[-1].value}",
         "ths": lambda: "检索「贵州茅台」→ " + ", ".join(f"{i['name']} {i['thscode']}" for i in ths.search("贵州茅台", "a-share", 1)),
+        "mineru": mineru.check,
         "rss": lambda: f"拉到 {len(news.parse_feed(httpx.get(news.FEEDS[1][1], timeout=15, headers={'User-Agent': sources_mod.USER_AGENT}).text))} 篇（{news.FEEDS[1][0]}）",
         "grok": lambda: "magpie 里的 Grok 模型：" + (", ".join(
             m["id"] for m in model_settings.catalog(model_settings.environment_route(), include_url=False)["models"]

@@ -24,7 +24,7 @@ from .errors import OntologyError
 ENV_FILE = Path(os.environ.get("ENV_FILE") or Path(__file__).resolve().parent.parent / ".env")
 
 CATEGORIES = {"macro": "宏观经济", "a-share": "A 股", "news": "新闻资讯", "social": "社交媒体",
-              "internal": "内部计算"}
+              "parsing": "文档解析", "internal": "内部计算"}
 
 
 @dataclass
@@ -62,6 +62,10 @@ PROVIDERS: dict[str, Provider] = {p.id: p for p in [
              note="A 股与指数日 K、估值、财务指标、标的检索、指数成分股；在官网「API Key 管理」签发密钥"),
     Provider("rss", "新闻 RSS", "news", "", note="CoinDesk、Cointelegraph、Decrypt、The Block、Bitcoin Magazine、PANews"),
     Provider("grok", "X（经 Grok）", "social", "https://x.ai", note="search_x 工具经 magpie 调用 Grok 的 x_search；需要 magpie 里配置 Grok"),
+    Provider("mineru", "MinerU 文档解析", "parsing", "https://mineru.net", "https://mineru.net/apiManage/docs",
+             auth_env="MINERU_API_KEY",
+             note="把文献库里的 PDF 转成 Markdown 和图表，供「精读」生成解读；PDF 会上传到 mineru.net。"
+                  "自建服务时把 MINERU_API_URL 设为它的地址，可以不填密钥"),
     Provider("manual", "手动导入", "internal", "", note="python -m ontology.cli import-csv"),
     Provider("internal", "内部计算", "internal", "", note="新闻热度、新闻情绪等派生序列"),
 ]}

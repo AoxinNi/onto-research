@@ -39,6 +39,23 @@ def _own_mcp_servers(monkeypatch, tmp_path):
     mcp_clients._tools.clear()
 
 
+@pytest.fixture(autouse=True)
+def _own_paper_cache(monkeypatch, tmp_path):
+    """MinerU conversions go to a cache folder of the test's own, and no test talks to mineru.net."""
+    from ontology import mineru
+
+    monkeypatch.setenv(mineru.ENV_CACHE, str(tmp_path / "papers"))
+    monkeypatch.delenv(mineru.ENV_KEY, raising=False)
+    monkeypatch.delenv(mineru.ENV_URL, raising=False)
+    monkeypatch.setattr(mineru, "POLL_SECONDS", 0)
+
+    def refuse(request):
+        raise AssertionError("a test tried to reach MinerU")
+
+    import httpx
+    monkeypatch.setattr(mineru, "TEST_TRANSPORT", httpx.MockTransport(refuse))
+
+
 @pytest.fixture
 def conn():
     params = conninfo_to_dict(TEST_URL)
