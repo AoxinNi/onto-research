@@ -32,10 +32,10 @@ class BrokenReply(Exception):
 WRITE_TOOLS = {
     "upsert_node", "update_props", "create_link", "merge_nodes", "archive",
     "submit_changeset", "revert_changeset", "propose_type", "propose_binding", "add_evidence_note",
-    "add_item", "add_excerpt", "write_note", "append_note", "ground",
+    "add_item", "add_local_files", "add_excerpt", "write_note", "append_note", "ground",
     "suggest_edit", "suggest_section", "suggest_outline",
 }
-LIBRARY_TOOLS = {"add_item", "add_excerpt", "write_note", "append_note", "ground"}  # pages refresh their library view
+LIBRARY_TOOLS = {"add_item", "add_local_files", "add_excerpt", "write_note", "append_note", "ground"}  # pages refresh their library view
 MANUSCRIPT_TOOLS = {"suggest_edit", "suggest_section", "suggest_outline"}  # pages refresh the writing view
 
 SYSTEM = mcp_server.INSTRUCTIONS + """

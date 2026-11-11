@@ -15,7 +15,7 @@ from typing import Any, Literal
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from . import evidence, news, projects, resolve, ths, xsearch
+from . import evidence, localfiles, news, projects, resolve, ths, xsearch
 from .library import Library
 from .manuscripts import Manuscripts
 from .sources import SOURCES
@@ -44,7 +44,8 @@ Rules:
    how to use them. Never describe articles or posts you did not get from these tools.
 8. Library: the project's sources (papers, books, web pages) live in its library. Find them with search_library,
    read them with get_item / read_item. Add a source only with add_item and an identifier (a DOI, arXiv id, ISBN,
-   an id from search_scholarly, or a web address): never type citation metadata yourself, and never cite or
+   an id from search_scholarly, or a web address), or with add_local_files for papers in a folder on this computer
+   that the user opened to you (see list_local_files): never type citation metadata yourself, and never cite or
    describe a paper that is not in the library. Quote only text read_item returned, and keep the passage with
    add_excerpt (it is checked against the text). Tie a source to a node or link with ground (stance states,
    supports, contradicts or qualifies), with an excerpt whenever you can; groundings are reviewed like other
@@ -405,6 +406,33 @@ async def add_item(identifier: str, tags: list[str] | None = None, with_file: bo
     item = out["item"]
     brief = {k: item[k] for k in ("id", "citekey", "kind", "title", "authors", "year", "doi", "url")}
     return {"item": brief, "created": out["created"], "file": out.get("file"), "file_error": out.get("file_error")}
+
+
+def _doi_lookup(doi: str) -> dict[str, Any]:
+    try:
+        return resolve.doi(doi)
+    except OntologyError:
+        raise
+    except Exception as e:  # the DOI service being down must not lose the file
+        raise OntologyError(f"DOI lookup failed: {e}") from None
+
+
+@ontology_tool
+def list_local_files(folder: str | None = None) -> dict[str, Any]:
+    """Paper files (PDF, Markdown, text) in the folders on this computer that the user opened to you, each with its
+    subfolder and whether it is already in the library. folder narrows the listing to one subfolder (absolute, or
+    relative to an allowed folder). Only in the local workbench and the desktop app."""
+    return localfiles.list_files(library(), folder)
+
+
+@ontology_tool_async
+async def add_local_files(paths: list[str], tags: list[str] | None = None) -> list[dict[str, Any]]:
+    """Add files from list_local_files to the library, at most 20 per call, by the paths it listed. A DOI printed in
+    a PDF fills in the metadata; otherwise the PDF's own title stands in (needs_metadata) until the user edits it.
+    A file already in the library is reported, not added again. tags apply to every file in the call, so call once
+    per subfolder when its name is a useful tag."""
+    lib = library()
+    return await asyncio.to_thread(localfiles.add_files, lib, paths, tags, _doi_lookup)
 
 
 @ontology_tool_async

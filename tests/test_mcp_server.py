@@ -14,7 +14,7 @@ EXPECTED = {
     "get_link_evidence", "add_evidence_note", "search_x",
     "a_share_search", "a_share_quote", "a_share_financials", "a_share_index_members", "list_projects", "use_project",
     "search_library", "get_item", "read_item", "add_item", "search_scholarly", "add_excerpt", "list_notes", "get_note",
-    "write_note", "append_note", "ground",
+    "write_note", "append_note", "ground", "list_local_files", "add_local_files",
     "list_manuscripts", "get_manuscript", "read_section", "suggest_edit", "suggest_section", "suggest_outline",
     "check_citations",
 }
