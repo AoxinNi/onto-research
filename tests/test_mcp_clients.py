@@ -171,6 +171,27 @@ def test_the_agent_gets_the_tools_of_enabled_servers(market_url):
     assert agent.external_name("a", "get.price/v2") == "mcp__a__get_price_v2"
 
 
+def test_an_open_chat_picks_up_servers_added_after_it_started(market_url, monkeypatch):
+    from tests.fake_claude import FakeClaude
+
+    chat = agent.WorkbenchAgent(client=FakeClaude())
+    names = lambda tools: {t["name"] for t in tools if t["name"].startswith("mcp__")}  # noqa: E731
+    assert names(asyncio.run(chat.tools())) == set()
+    market(market_url)
+    assert "mcp__market__quote" in names(asyncio.run(chat.tools()))
+    mcp_clients.delete("market")
+    assert names(asyncio.run(chat.tools())) == set() and chat._external == {}
+
+    # A server that does not answer is left out for a minute rather than waited on at every message.
+    mcp_clients.create({"name": "down", "url": closed_port()})
+    tried = []
+    real = mcp_clients.fetch_tools
+    monkeypatch.setattr(mcp_clients, "fetch_tools", lambda s: tried.append(s["name"]) or real(s))
+    asyncio.run(chat.tools())
+    asyncio.run(chat.tools())
+    assert tried == ["down"]
+
+
 def test_an_mcp_tool_is_collected_as_a_data_source(reg, store, human, market_url):
     market(market_url)
     made = custom_sources.create(reg, {"name": "px", "kind": "mcp", "title": "行情", "config": {

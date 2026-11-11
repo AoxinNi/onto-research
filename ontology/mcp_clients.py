@@ -35,9 +35,10 @@ HEADER = re.compile(r"[A-Za-z0-9!#$%&'*+.^_`|~-]{1,100}")
 MAX_HEADERS = 20
 CALL_SECONDS = 120
 TOOLS_TTL = 300  # seconds a server's tool list is reused before it is asked again
+FAILED_TTL = 60  # seconds an unreachable server is left out before it is tried again
 TEST_TRANSPORT: httpx2.AsyncBaseTransport | None = None  # tests serve an MCP app in-process through this
 
-_tools: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+_tools: dict[str, tuple[float, list[dict[str, Any]] | OntologyError]] = {}
 
 
 # ------------------------------------------------------------------ the local file
@@ -232,11 +233,21 @@ async def fetch_tools(s: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 async def tools(name: str, fresh: bool = False) -> list[dict[str, Any]]:
-    """A server's tools, reused for TOOLS_TTL seconds."""
+    """A server's tools, reused for TOOLS_TTL seconds. A server that could not be reached is not asked again for
+    FAILED_TTL seconds, so an agent turn does not wait on it every message."""
     hit = _tools.get(name)
-    if hit and not fresh and time.monotonic() - hit[0] < TOOLS_TTL:
-        return hit[1]
-    out = await fetch_tools(server(name))
+    if hit and not fresh:
+        age = time.monotonic() - hit[0]
+        if isinstance(hit[1], OntologyError) and age < FAILED_TTL:
+            raise hit[1]
+        if isinstance(hit[1], list) and age < TOOLS_TTL:
+            return hit[1]
+    try:
+        out = await fetch_tools(server(name))
+    except OntologyError as e:
+        if not str(e).startswith("no MCP server"):
+            _tools[name] = (time.monotonic(), e)
+        raise
     _tools[name] = (time.monotonic(), out)
     return out
 

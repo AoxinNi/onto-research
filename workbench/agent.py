@@ -159,12 +159,13 @@ class WorkbenchAgent:
                 for m in self.messages]
 
     async def tools(self) -> list[dict[str, Any]]:
+        """The ontology tools, plus the tools of the MCP servers connected right now. Asked once per message, so a
+        server added, edited or removed on the MCP page shows up in a chat that is already open."""
         if self._tools is None:
             # The page fixes the project, so the in-page agent does not get the switch.
-            own = tool_definitions([t for t in await mcp_server.server.list_tools() if t.name != "use_project"])
-            external, self._external = await external_tools()
-            self._tools = own + external
-        return self._tools
+            self._tools = tool_definitions([t for t in await mcp_server.server.list_tools() if t.name != "use_project"])
+        external, self._external = await external_tools()
+        return self._tools + external
 
     async def _create(self, **kw: Any) -> Any:
         """One model call. A gateway such as magpie can drop the upstream mid-reply and hand back a body that is
