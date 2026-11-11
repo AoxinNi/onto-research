@@ -72,7 +72,7 @@ cargo clippy --all-targets -- -D warnings && cargo fmt --check
 
 1. **应用标识符**：`tauri.conf.json` 中的 `identifier`（目前为 `com.ontoresearch.desktop`）应改为你拥有的域名的反写，并在首次发布前确定。发布后修改会让系统把它当作另一个应用，已保存的登录状态也会丢失。
 2. **默认服务器**：在仓库变量 `ONTO_DEFAULT_SERVER` 中填写生产工作台的 HTTPS 来源。
-3. **CloudBase 服务端**：先部署本次服务端改动，再分发应用。旧版服务端会返回「服务器版本过旧」。如果开放微信登录，回调路径不变（`/auth/wechat/callback`），无需额外配置域名。
+3. **CloudBase 服务端**：先部署本次服务端改动，再分发应用。旧版服务端会返回「服务器版本过旧」。如果开放微信登录，回调路径不变（`/auth/wechat/callback`），无需额外配置域名。建议把云托管服务的最小实例数设为 1（`tcb cloudrun deploy ... --min-num 1`）：实例数为 0 时，空闲后的第一个请求要等容器冷启动，可能超过一分钟。应用启动时遇到 502/503/504 会显示「工作台正在启动」并自动重试，最长约 150 秒。
 4. **macOS 签名与公证**：按 `.github/workflows/desktop-release.yml` 顶部注释配置 Apple 证书和公证凭据。未签名的应用会被 Gatekeeper 阻止，且钥匙串在每次重新构建后都会再次请求授权。
 5. **Windows 签名**：取得代码签名证书后，在 `bundle.windows` 中配置 `certificateThumbprint` 或 `signCommand`。
 6. **自动更新**（尚未启用）：运行 `npx tauri signer generate` 生成更新签名密钥，私钥保存为 CI secret（不要提交到仓库）；然后加入 `tauri-plugin-updater`，在 `tauri.conf.json` 中填写公钥和更新地址（`latest.json`）。

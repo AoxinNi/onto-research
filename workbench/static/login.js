@@ -225,9 +225,15 @@ function showServer(server) {
   serverPanel.hidden = false;
 }
 
+const BOOT_TEXT = "正在连接工作台…";
+const WAKING_TEXT = "工作台正在启动，首次连接可能需要一两分钟…";
+
 async function startDesktop() {
+  boot.textContent = BOOT_TEXT;
   boot.hidden = false;
   auth.hidden = connection.hidden = true;
+  // A cloud server with no warm instance takes a while to start; the app keeps trying meanwhile.
+  const waking = setTimeout(() => { boot.textContent = WAKING_TEXT; }, 6000);
   let state;
   try {
     state = await invoke("session_boot");
@@ -238,6 +244,8 @@ async function startDesktop() {
     $("#connection-error-text").textContent = errorText(error);
     connection.hidden = false;
     return;
+  } finally {
+    clearTimeout(waking);
   }
   showServer(state.server);
   if (!(state.api >= 1) || state.api > SUPPORTED_API) {
