@@ -8,34 +8,6 @@
 # params 里的 {prop} 用节点属性替换，例如 {symbol}USDT -> BTCUSDT。
 
 templates:
-  - id: spot-price
-    type: Asset
-    props: {asset_class: spot}
-    role: price
-    source: binance_klines
-    params: {symbol: "{symbol}USDT", interval: 1h}
-
-  - id: spot-price-daily        # long history, so slow macro series have something to be compared with
-    type: Asset
-    props: {asset_class: spot}
-    role: price_daily
-    source: binance_klines
-    params: {symbol: "{symbol}USDT", interval: 1d}
-
-  - id: stablecoin-usdt
-    type: Asset
-    terms: [usdt, tether]
-    role: supply
-    source: defillama_stablecoin
-    params: {id: "1"}
-
-  - id: stablecoin-freezes        # USDT/USDC blacklistings on Ethereum and Tron, USD per hour
-    type: Metric
-    terms: [稳定币冻结额, 稳定币冻结, 稳定币冻结金额, 稳定币黑名单冻结, stablecoin freezes, stablecoin freeze]
-    role: value
-    source: stablecoin_freezes
-    params: {token: all, chain: all}
-
   - id: fed-funds-target
     type: MacroIndicator
     terms: [联邦基金目标利率, federal funds target rate, fed target rate]
@@ -84,27 +56,6 @@ templates:
     source: fred
     params: {series: DGS10}
     unit: "%"
-
-  - id: funding-rate
-    type: Metric
-    terms: [资金费率, 永续合约资金费率, funding rate]
-    role: value
-    source: binance_funding
-    params: {symbol: BTCUSDT}
-
-  - id: open-interest
-    type: Metric
-    terms: [未平仓量, 合约未平仓量, 持仓量, open interest, oi]
-    role: value
-    source: binance_oi
-    params: {symbol: BTCUSDT, period: 1h}
-
-  - id: hashrate
-    type: Metric
-    terms: [全网算力, 算力, hashrate, network hashrate]
-    role: value
-    source: mempool_hashrate
-    params: {}
 
   # ---------------------------------------------------------------- A 股（同花顺，需要 THS_API_KEY）
 

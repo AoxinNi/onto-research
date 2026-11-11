@@ -167,7 +167,7 @@ def _node_series(conn: psycopg.Connection) -> dict[str, list[dict[str, Any]]]:
     out: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         # Levels that are always positive and not rates compare as log returns; rates and scores as differences.
-        log = (r["minv"] or 0) > 0 and r["unit"] != "%" and r["source"] not in ("news_sentiment", "binance_funding")
+        log = (r["minv"] or 0) > 0 and r["unit"] != "%" and r["source"] != "news_sentiment"
         out.setdefault(r["node_id"], []).append({**r, "log": log})
     for v in out.values():
         v.sort(key=lambda s: ROLE_ORDER.index(s["role"]) if s["role"] in ROLE_ORDER else 99)

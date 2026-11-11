@@ -1,0 +1,151 @@
+# 绑定模板：节点符合条件时自动绑定数据序列，直接生效（不进审核栏）。
+# 人可以在工作台里移除自动绑定；移除后同一个模板不会再加回来。
+# 匹配方式（可组合，全部满足才匹配）：
+#   terms: 节点名称或别名（不分大小写）里出现任意一个
+#   props: 节点属性全部等于给定值
+#   match: 节点属性符合正则，例如 A 股代码
+# 需要密钥的数据源（如同花顺）在密钥配置好之前不会自动绑定。
+# params 里的 {prop} 用节点属性替换，例如 {symbol}USDT -> BTCUSDT。
+
+templates:
+  - id: spot-price
+    type: Asset
+    props: {asset_class: spot}
+    role: price
+    source: binance_klines
+    params: {symbol: "{symbol}USDT", interval: 1h}
+
+  - id: spot-price-daily        # long history, so slow macro series have something to be compared with
+    type: Asset
+    props: {asset_class: spot}
+    role: price_daily
+    source: binance_klines
+    params: {symbol: "{symbol}USDT", interval: 1d}
+
+  - id: stablecoin-usdt
+    type: Asset
+    terms: [usdt, tether]
+    role: supply
+    source: defillama_stablecoin
+    params: {id: "1"}
+
+  - id: stablecoin-freezes        # USDT/USDC blacklistings on Ethereum and Tron, USD per hour
+    type: Metric
+    terms: [稳定币冻结额, 稳定币冻结, 稳定币冻结金额, 稳定币黑名单冻结, stablecoin freezes, stablecoin freeze]
+    role: value
+    source: stablecoin_freezes
+    params: {token: all, chain: all}
+
+  - id: fed-funds-target
+    type: MacroIndicator
+    terms: [联邦基金目标利率, federal funds target rate, fed target rate]
+    role: value
+    source: fred
+    params: {series: DFEDTARU}
+    unit: "%"
+
+  - id: fed-funds-effective
+    type: MacroIndicator
+    terms: [联邦基金利率, 有效联邦基金利率, fed funds rate, effective federal funds rate, dff]
+    role: value
+    source: fred
+    params: {series: DFF}
+    unit: "%"
+
+  - id: dollar-index
+    type: MacroIndicator
+    terms: [美元指数, dxy, us dollar index, dollar index]
+    role: value
+    source: fred
+    params: {series: DTWEXBGS}
+    unit: 指数点
+    label: 美元广义指数（FRED DTWEXBGS，DXY 的公开替代）
+
+  - id: m2
+    type: MacroIndicator
+    terms: [m2, 美国广义货币供应量, 广义货币, us m2]
+    role: value
+    source: fred
+    params: {series: M2SL}
+    unit: 十亿美元
+
+  - id: cpi
+    type: MacroIndicator
+    terms: [cpi, 消费者物价指数, 通胀]
+    role: value
+    source: fred
+    params: {series: CPIAUCSL}
+    unit: 指数
+
+  - id: us10y
+    type: MacroIndicator
+    terms: [us10y, 十年期美债收益率, 10年期美债, 10-year treasury yield]
+    role: value
+    source: fred
+    params: {series: DGS10}
+    unit: "%"
+
+  - id: funding-rate
+    type: Metric
+    terms: [资金费率, 永续合约资金费率, funding rate]
+    role: value
+    source: binance_funding
+    params: {symbol: BTCUSDT}
+
+  - id: open-interest
+    type: Metric
+    terms: [未平仓量, 合约未平仓量, 持仓量, open interest, oi]
+    role: value
+    source: binance_oi
+    params: {symbol: BTCUSDT, period: 1h}
+
+  - id: hashrate
+    type: Metric
+    terms: [全网算力, 算力, hashrate, network hashrate]
+    role: value
+    source: mempool_hashrate
+    params: {}
+
+  # ---------------------------------------------------------------- A 股（同花顺，需要 THS_API_KEY）
+
+  - id: a-share-daily
+    type: Asset
+    props: {asset_class: equity}
+    match: {symbol: '^\d{6}\.(SH|SZ|BJ)$'}
+    role: price
+    source: ths_stock_daily
+    params: {thscode: "{symbol}", adjust: forward}
+
+  - id: a-share-pe
+    type: Asset
+    props: {asset_class: equity}
+    match: {symbol: '^\d{6}\.(SH|SZ|BJ)$'}
+    role: valuation
+    source: ths_valuation
+    params: {thscode: "{symbol}", metric: pe_ttm}
+
+  - id: a-share-roe
+    type: Asset
+    props: {asset_class: equity}
+    match: {symbol: '^\d{6}\.(SH|SZ|BJ)$'}
+    role: roe
+    source: ths_fin_indicator
+    params: {thscode: "{symbol}", metric: index_weighted_avg_roe}
+    unit: "%"
+
+  - id: a-share-revenue-growth
+    type: Asset
+    props: {asset_class: equity}
+    match: {symbol: '^\d{6}\.(SH|SZ|BJ)$'}
+    role: revenue_growth
+    source: ths_fin_indicator
+    params: {thscode: "{symbol}", metric: operating_income_yoy_growth_ratio}
+    unit: "%"
+
+  - id: a-share-index
+    type: Asset
+    props: {asset_class: index}
+    match: {symbol: '^(\d{6}\.(SH|SZ)|\d{6}\.TI)$'}
+    role: price
+    source: ths_index_daily
+    params: {thscode: "{symbol}"}

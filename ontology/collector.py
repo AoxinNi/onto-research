@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import psycopg
 
-from . import evidence, history, news, onchain, projects
+from . import evidence, history, news, projects
 from .db import connect
 from .providers import load_env_file
 from .errors import OntologyError
@@ -72,12 +72,6 @@ def run_once(conn: psycopg.Connection) -> list[str]:
     for s in store.series.collectable():
         if due(s, now) and collect_series(store, s, now):
             changed.append(s["id"])
-    if os.environ.get("COLLECT_ONCHAIN", "0") == "1":
-        try:
-            if onchain.promote_freezes(conn, now):
-                changed.append("onchain")
-        except Exception:
-            log.exception("freeze promotion failed")
     if news_enabled():
         try:
             changed += news.run(conn)
