@@ -10,8 +10,9 @@ The same PDF in two projects is converted once. The cache folder is ONTO_PAPER_C
 application-data folder.
 
 Conversion uses MinerU's V1 Tasks API (create a task, PUT the PDF to the link it returns, poll, download the result
-ZIP). By default that is the hosted service at mineru.net, which needs MINERU_API_KEY and receives the PDF;
-MINERU_API_URL can point at a self-hosted `mineru-kit api-server` instead, which needs no key.
+ZIP). By default that is the hosted service at mineru.net, which needs a key and receives the PDF; the address can
+point at a self-hosted `mineru-kit api-server` instead, which needs none. The connection is set in 平台设置 (saved
+in settings_file()); MINERU_API_KEY / MINERU_API_URL in the environment are the fallback.
 """
 
 from __future__ import annotations
@@ -37,6 +38,7 @@ from .errors import OntologyError
 ENV_URL = "MINERU_API_URL"
 ENV_KEY = "MINERU_API_KEY"
 ENV_CACHE = "ONTO_PAPER_CACHE"
+ENV_SETTINGS = "ONTO_MINERU_SETTINGS"  # where 平台设置 saves the connection; tests point it at a temporary file
 DEFAULT_URL = "https://mineru.net/api"
 FOLDER = "mineru"
 POLL_SECONDS = 3.0
@@ -50,7 +52,7 @@ IMAGE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.(?:png|jpe?g|gif|webp)", 
 TERMINAL = {"completed", "partial", "failed", "canceled"}
 CAPTION = re.compile(r"^\s*(?:\*\*)?\s*(fig(?:ure)?s?\.?|table|tab\.|chart|图|表)\s*[A-Za-z]?\s*\d", re.I)
 ERRORS = {
-    "invalid_api_key": "MinerU 拒绝了密钥：检查 MINERU_API_KEY",
+    "invalid_api_key": "MinerU 拒绝了密钥：在「平台设置」里检查 Secret Key",
     "quota_exceeded": "MinerU 的解析额度用完了，稍后再试",
     "rate_limit_exceeded": "MinerU 请求太频繁，稍后再试",
     "file_encrypted": "PDF 有密码保护，MinerU 无法解析",
@@ -63,12 +65,36 @@ ERRORS = {
 # ------------------------------------------------------------------ settings and the cache
 
 
+def settings_file() -> Path:
+    """Where 平台设置 keeps the MinerU connection on this computer, next to the model settings."""
+    if os.environ.get(ENV_SETTINGS):
+        return Path(os.environ[ENV_SETTINGS]).expanduser()
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "onto-research" / "mineru.json"
+
+
+def _saved() -> dict[str, Any]:
+    try:
+        with settings_file().open("rb") as f:
+            data = json.loads(f.read(64 * 1024))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def api_url() -> str:
-    return (os.environ.get(ENV_URL) or DEFAULT_URL).strip().rstrip("/")
+    """The saved service address, else MINERU_API_URL, else mineru.net."""
+    saved = _saved().get("url")
+    return (saved if isinstance(saved, str) and saved else os.environ.get(ENV_URL) or DEFAULT_URL).strip().rstrip("/")
 
 
 def api_key() -> str | None:
-    return os.environ.get(ENV_KEY, "").strip() or None
+    """The saved secret key, else MINERU_API_KEY. It is sent as `Authorization: Bearer <secret>`."""
+    saved = _saved().get("secret")
+    return (saved if isinstance(saved, str) and saved else os.environ.get(ENV_KEY, "")).strip() or None
+
+
+def _hint(secret: str | None) -> str | None:
+    return f"••••{secret[-4:]}" if secret and len(secret) >= 12 else ("已设置" if secret else None)
 
 
 def status() -> dict[str, Any]:
@@ -78,6 +104,66 @@ def status() -> dict[str, Any]:
     hosted = host == "mineru.net" or host.endswith(".mineru.net")
     key = bool(api_key())
     return {"url": url, "host": host, "hosted": hosted, "key": key, "ready": key or not hosted}
+
+
+def settings() -> dict[str, Any]:
+    """The connection as 平台设置 shows it. The secret itself never leaves this module, only its last 4 characters."""
+    saved = _saved()
+    secret = saved.get("secret") if isinstance(saved.get("secret"), str) else ""
+    env_key = os.environ.get(ENV_KEY, "").strip()
+    return {
+        **status(),
+        "default_url": DEFAULT_URL,
+        "saved_url": saved.get("url") or "",
+        "key_id": saved.get("key_id") or "",
+        "secret_configured": bool(secret),
+        "secret_hint": _hint(secret),
+        "key_source": "settings" if secret else "environment" if env_key else None,
+        "env_hint": _hint(env_key) if env_key and not secret else None,
+        "file": str(settings_file()),
+    }
+
+
+def _clean_url(value: Any) -> str:
+    url = (value or "").strip().rstrip("/") if isinstance(value, str) else ""
+    if not url:
+        return ""
+    try:
+        parts = urlsplit(url)
+        ok = parts.scheme in ("http", "https") and parts.hostname and not parts.username and not parts.password \
+            and not parts.query and not parts.fragment and len(url) <= 512
+        parts.port  # noqa: B018  (raises on a bad port)
+    except ValueError:
+        ok = False
+    if not ok:
+        raise OntologyError("服务地址应为 http(s)://主机[:端口][/路径]，不带账号、参数或 #")
+    return "" if url == DEFAULT_URL else url
+
+
+def save_settings(data: dict[str, Any]) -> dict[str, Any]:
+    """Save the connection. An empty secret keeps the saved one, unless the address changed: a secret is never
+    sent to a server other than the one it was saved for. clear_secret removes it."""
+    current = _saved()
+    url = _clean_url(data.get("url"))
+    key_id = data.get("key_id", current.get("key_id", ""))
+    secret = data.get("secret") or ""
+    for name, value, limit in (("Key ID", key_id, 200), ("Secret Key", secret, 2048)):
+        if not isinstance(value, str) or len(value.strip()) > limit or not re.fullmatch(r"[\x21-\x7e]*", value.strip()):
+            raise OntologyError(f"{name} 格式不对：应为不含空格的一串字符")
+    secret = secret.strip()
+    if not secret and not data.get("clear_secret") and url == (current.get("url") or ""):
+        secret = current.get("secret") or ""
+    out = {k: v for k, v in (("url", url), ("key_id", key_id.strip()), ("secret", secret)) if v}
+    path = settings_file()
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:  # mode 0600
+        try:
+            json.dump(out, handle, ensure_ascii=False)
+            handle.close()
+            os.replace(handle.name, path)
+        finally:
+            Path(handle.name).unlink(missing_ok=True)
+    return settings()
 
 
 def cache_root() -> Path:
@@ -136,15 +222,22 @@ def check() -> str:
     """One cheap authenticated request, for the sources page's test button."""
     st = status()
     if not st["ready"]:
-        raise OntologyError("需要 MINERU_API_KEY")
+        raise OntologyError("需要 MinerU 密钥：在「平台设置」里填写 Secret Key")
     extra = {"transport": TEST_TRANSPORT} if TEST_TRANSPORT else {}
     auth = {"Authorization": f"Bearer {api_key()}"} if api_key() else {}
     try:
         with httpx.Client(timeout=20, **extra) as cli:
-            _json(cli.get(f"{st['url']}/v1/usage", headers=auth))
+            usage = _json(cli.get(f"{st['url']}/v1/usage", headers=auth))
     except httpx.HTTPError as e:
         raise OntologyError(f"连不上 MinerU（{st['host']}）：{type(e).__name__}") from None
-    return f"{st['host']} 可用，密钥有效" if st["key"] else f"{st['host']} 可用"
+    level = str(usage.get("access_level") or "")
+    if st["key"] and level == "anonymous":
+        raise OntologyError(f"{st['host']} 把这次请求当作匿名访问：密钥没有生效，检查 Secret Key")
+    current = usage.get("current") if isinstance(usage.get("current"), dict) else {}
+    pages = current.get("pages_processed")
+    parts = [f"{st['host']} 可用", "密钥有效" if st["key"] else "", f"账号级别 {level}" if level else "",
+             f"本期已解析 {pages} 页" if isinstance(pages, int) else ""]
+    return "，".join(p for p in parts if p)
 
 
 # ------------------------------------------------------------------ figures and tables
@@ -294,7 +387,7 @@ def convert(sha: str, filename: str, data: bytes, on_stage: Callable[[str], None
     """Convert one PDF and put the result in the cache. Blocking: run it in a worker thread."""
     st = status()
     if not st["ready"]:
-        raise OntologyError("需要 MinerU 的 API 密钥（MINERU_API_KEY）：在 mineru.net 申请后填写")
+        raise OntologyError("需要 MinerU 密钥：在 mineru.net 申请后，到「平台设置」里填写 Key ID 和 Secret Key")
     base = st["url"]
     auth = {"Authorization": f"Bearer {api_key()}"} if api_key() else {}
     name = re.sub(r"[/\\:\x00-\x1f]", "_", filename).strip() or "paper.pdf"

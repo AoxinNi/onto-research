@@ -399,6 +399,40 @@ async def put_model_settings(request: Request) -> dict:
         raise HTTPException(status_code=503, detail="无法保存本机模型设置。") from None
 
 
+def _mineru_settings_user(request: Request) -> None:
+    """MinerU settings live on the computer that runs the workbench: only the local workbench can change them."""
+    if _model_settings_user(request):
+        raise HTTPException(status_code=403, detail="云端工作台的 MinerU 由运营者在部署环境中配置。")
+
+
+@app.get("/api/settings/mineru")
+def get_mineru_settings(request: Request) -> dict:
+    if _model_settings_user(request):
+        return {**mineru.status(), "editable": False}
+    return {**mineru.settings(), "editable": True}
+
+
+@app.put("/api/settings/mineru")
+async def put_mineru_settings(request: Request) -> dict:
+    _mineru_settings_user(request)
+    data = await _json_body(request)
+    try:
+        return {**await asyncio.to_thread(mineru.save_settings, data), "editable": True}
+    except OntologyError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    except OSError:
+        raise HTTPException(status_code=503, detail="无法保存本机 MinerU 设置。") from None
+
+
+@app.post("/api/settings/mineru/test")
+async def test_mineru_settings(request: Request) -> dict:
+    _mineru_settings_user(request)
+    try:
+        return {"ok": True, "message": await asyncio.to_thread(mineru.check)}
+    except OntologyError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+
+
 @app.post("/api/settings/model/test")
 async def test_model_settings(request: Request) -> dict:
     user_id = _model_settings_user(request)
@@ -618,7 +652,8 @@ def _test_provider(provider_id: str) -> dict[str, Any]:
     if not p:
         raise HTTPException(status_code=404, detail=f"no provider '{provider_id}'")
     if not p.configured():
-        return {"ok": False, "message": f"未配置：请在 .env 里设置 {p.auth_env}，然后重启工作台"}
+        where = "在「平台设置」里填写" if p.settings_view == "settings" else f"请在 .env 里设置 {p.auth_env}，然后重启工作台"
+        return {"ok": False, "message": f"未配置：{where}"}
     started = time.monotonic()
     now = datetime.now(UTC)
     checks = {

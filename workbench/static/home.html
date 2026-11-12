@@ -83,7 +83,7 @@
         <div>
           <p class="eyebrow">WORKBENCH SETTINGS</p>
           <h1>平台设置</h1>
-          <p class="lede">配置工作台 Agent 使用的模型。保存后，下一次对话请求会使用新的连接。</p>
+          <p class="lede">配置工作台 Agent 使用的模型，以及文献精读用的 MinerU 文档解析。保存后，下一次请求就会使用新的连接。</p>
         </div>
       </header>
       <form id="model-settings" class="panel-card model-settings">
@@ -123,6 +123,31 @@
           <button type="button" class="btn lg" id="test-model-settings" disabled>测试已保存连接</button>
         </div>
         <p id="model-settings-result" class="test-result" aria-live="polite" hidden></p>
+      </form>
+
+      <form id="mineru-settings" class="panel-card model-settings" autocomplete="off">
+        <h2>MinerU 文档解析</h2>
+        <p class="hint">文献「精读」用 MinerU 把 PDF 转成 Markdown 和图表。在 mineru.net 的 API 管理页创建密钥后，把 Key ID 和 Secret Key 填在这里；PDF 会上传到下面的服务地址解析。</p>
+        <label class="field">
+          <span>服务地址</span>
+          <input name="url" type="url" spellcheck="false" maxlength="512" placeholder="https://mineru.net/api">
+        </label>
+        <label class="field">
+          <span>Key ID</span>
+          <input name="key_id" spellcheck="false" maxlength="200" placeholder="密钥的 ID，用来认出是哪一把">
+        </label>
+        <label class="field">
+          <span>Secret Key</span>
+          <input name="secret" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048">
+        </label>
+        <p id="mineru-hint" class="hint"></p>
+        <div class="page-actions">
+          <button type="submit" class="btn primary lg" disabled>保存设置</button>
+          <button type="button" class="btn lg" id="test-mineru-settings" disabled>测试已保存连接</button>
+          <button type="button" class="btn lg" id="clear-mineru-secret" hidden>清除 Secret Key</button>
+          <a class="btn lg" href="https://mineru.net/apiManage/token" target="_blank" rel="noopener noreferrer">去 mineru.net 申请</a>
+        </div>
+        <p id="mineru-settings-result" class="test-result" aria-live="polite" hidden></p>
       </form>
     </section>
 

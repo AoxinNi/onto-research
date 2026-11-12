@@ -44,14 +44,17 @@ async function api(url, opts = {}) {
 
 // ------------------------------------------------------------------ routing
 
-function show(view, push = false) {
+function show(view, push = false, hash = "") {
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== `view-${view}`;
   for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.view === view));
   document.title = `${{ mcp: "MCP 接入", sources: "数据源", settings: "平台设置" }[view] || "本体项目"} · 本体工作台`;
-  if (push) history.pushState({ view }, "", routes.view(view));
+  if (push) history.pushState({ view }, "", routes.view(view) + hash);
   if (view === "mcp") loadMcp();
   if (view === "sources") loadSources();
-  if (view === "settings") loadModelSettings();
+  if (view === "settings") {
+    loadModelSettings();
+    loadMineruSettings().then(() => { if (location.hash === "#mineru-settings") $("#mineru-settings").scrollIntoView({ block: "start" }); });
+  }
 }
 for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.view, true); });
@@ -579,6 +582,14 @@ async function loadSources() {
   }
 }
 
+// A provider whose connection is set on another page (MinerU: 平台设置) links there instead of taking a key here.
+function settingsRow(p) {
+  return el("div", { class: "src-key" }, el("div", { class: "key-line" },
+    p.key_hint ? el("span", {}, "密钥 ", el("code", {}, p.key_hint)) : el("span", {}, p.configured ? "无需密钥" : "未配置密钥"),
+    el("span", { class: "key-actions" },
+      el("button", { type: "button", class: "link", onclick: () => show(p.settings_view, true, `#${p.id}-settings`) }, "在平台设置中配置"))));
+}
+
 // The key is written to .env on this machine and takes effect at once; the page only gets its last 4 characters.
 function keyRow(p) {
   const row = el("div", { class: "src-key" });
@@ -613,8 +624,8 @@ function keyRow(p) {
 
 function sourceCard(p, i) {
   const h = p.health;
-  const state = !p.configured ? ["warn", `需要 ${p.auth_env}`] : h.errors ? ["bad", `${h.errors} 条出错`]
-    : h.series ? ["ok", "运行中"] : ["idle", p.auth_env ? "已配置 · 未使用" : "可用 · 未使用"];
+  const state = !p.configured ? ["warn", p.settings_view ? "需要在平台设置中配置" : `需要 ${p.auth_env}`] : h.errors ? ["bad", `${h.errors} 条出错`]
+    : h.series ? ["ok", "运行中"] : ["idle", p.auth_env || p.settings_view ? "已配置 · 未使用" : "可用 · 未使用"];
   const result = el("p", { class: "test-result", hidden: true });
   const btn = el("button", { type: "button", class: "btn sm", onclick: async () => {
     btn.disabled = true; btn.textContent = "测试中…"; result.hidden = true;
@@ -636,7 +647,7 @@ function sourceCard(p, i) {
       el("span", {}, "最近成功 ", el("b", {}, h.last_ok ? ago(h.last_ok) : "—")),
       h.projects.length > 0 && el("span", {}, "项目 ", el("b", {}, h.projects.join("、")))),
     h.last_error && el("p", { class: "src-error" }, `${h.last_error.series}：${h.last_error.error}`),
-    p.auth_env && !cloudWorkspace && keyRow(p),
+    p.settings_view && !cloudWorkspace ? settingsRow(p) : p.auth_env && !cloudWorkspace && keyRow(p),
     p.sources.length > 0 && el("ul", { class: "src-list" }, ...p.sources.map((s) => el("li", {},
       el("span", {}, s.title), el("code", {}, s.source)))),
     el("div", { class: "src-foot" },
@@ -938,6 +949,72 @@ modelTest.addEventListener("click", async () => {
     modelMessage(`模型 ${result.model} 已成功响应。`);
   } catch (error) { modelMessage(error.message, true); }
   finally { modelSave.disabled = modelTest.disabled = false; }
+});
+
+// ------------------------------------------------------------------ MinerU settings
+
+const mineruForm = $("#mineru-settings");
+const mineruSave = mineruForm.querySelector('button[type="submit"]');
+const mineruTest = $("#test-mineru-settings");
+const mineruClear = $("#clear-mineru-secret");
+const mineruResult = $("#mineru-settings-result");
+
+function mineruMessage(text, error = false) {
+  mineruResult.hidden = false;
+  mineruResult.textContent = text;
+  mineruResult.classList.toggle("bad", error);
+}
+
+function fillMineru(d) {
+  const f = mineruForm.elements;
+  const locked = !d.editable;
+  for (const name of ["url", "key_id", "secret"]) f[name].disabled = locked;
+  mineruSave.disabled = mineruTest.disabled = locked;
+  f.url.value = d.editable ? d.saved_url : d.url;
+  f.key_id.value = d.key_id || "";
+  f.secret.value = "";
+  f.secret.placeholder = d.secret_configured ? `已保存 ${d.secret_hint}，留空则保留` : "粘贴 Secret Key";
+  mineruClear.hidden = !d.secret_configured;
+  $("#mineru-hint").textContent = !d.editable
+    ? "云端工作台的 MinerU 由运营者在部署环境中配置。"
+    : d.key_source === "settings" ? `已配置，精读会使用这里保存的密钥（服务：${d.host}）。`
+      : d.key_source === "environment" ? `正在使用 .env 里的 MINERU_API_KEY（${d.env_hint}）；在这里保存后以这里为准。`
+        : d.hosted ? "还没有密钥：保存 Key ID 和 Secret Key 后就能开始精读。" : `自建服务 ${d.host} 不需要密钥。`;
+}
+
+async function loadMineruSettings() {
+  mineruSave.disabled = mineruTest.disabled = true;
+  mineruResult.hidden = true;
+  try { fillMineru(await api("/api/settings/mineru")); } catch (error) { mineruMessage(error.message, true); }
+}
+
+async function saveMineru(body, done) {
+  mineruSave.disabled = mineruTest.disabled = mineruClear.disabled = true;
+  try {
+    fillMineru(await api("/api/settings/mineru", { method: "PUT", body: JSON.stringify(body) }));
+    mineruMessage(done);
+  } catch (error) { mineruMessage(error.message, true); }
+  finally { mineruSave.disabled = mineruTest.disabled = mineruClear.disabled = false; }
+}
+
+mineruForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const f = mineruForm.elements;
+  saveMineru({ url: f.url.value, key_id: f.key_id.value, secret: f.secret.value }, "MinerU 设置已保存。");
+});
+
+mineruClear.addEventListener("click", async () => {
+  if (!(await confirmAction("清除保存的 MinerU Secret Key？"))) return;
+  const f = mineruForm.elements;
+  saveMineru({ url: f.url.value, key_id: f.key_id.value, secret: "", clear_secret: true }, "已清除 Secret Key。");
+});
+
+mineruTest.addEventListener("click", async () => {
+  mineruSave.disabled = mineruTest.disabled = true;
+  try {
+    mineruMessage((await api("/api/settings/mineru/test", { method: "POST" })).message);
+  } catch (error) { mineruMessage(error.message, true); }
+  finally { mineruSave.disabled = mineruTest.disabled = false; }
 });
 
 // ------------------------------------------------------------------ start

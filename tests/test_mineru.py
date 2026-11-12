@@ -141,7 +141,7 @@ def test_convert_caches_markdown_images_and_figures(fake, tmp_path):
 
 def test_convert_errors(monkeypatch):
     pdf = b"%PDF-1.4 other"
-    with pytest.raises(OntologyError, match="API 密钥"):
+    with pytest.raises(OntologyError, match="平台设置"):
         mineru.convert(sha(pdf), "a.pdf", pdf)
     monkeypatch.setenv(mineru.ENV_KEY, "wrong")
     monkeypatch.setattr(mineru, "TEST_TRANSPORT", httpx.MockTransport(FakeMinerU()))
@@ -243,6 +243,7 @@ def test_reading_flow(client, fake, monkeypatch):
     pdf = make_pdf(["Screens and sleep.", "Page two."])
     f = client.post(f"/api/library/{item['id']}/files", content=pdf,
                     headers={"X-Filename": "zhang.pdf", "Content-Type": "application/pdf"}).json()["file"]
+    assert client.get(f"/api/library/{item['id']}/layout").status_code == 404  # not converted yet
     r = client.post(f"/api/library/{item['id']}/reading", json={})
     assert r.status_code == 200, r.text
     assert r.json()["status"] in ("converting", "summarizing", "ok")
@@ -253,6 +254,14 @@ def test_reading_flow(client, fake, monkeypatch):
     assert [n["label"] for n in done["digest"]["graph"]["nodes"]][0] == "手机使用影响睡眠吗"
     assert done["digest"]["figures"][0]["id"] == "F1" and [x["id"] for x in done["figures"]] == ["F1", "T1"]
     assert fake.uploaded == pdf and model.closed and "Screens and Sleep" in model.calls[0]["messages"][0]["content"]
+
+    # 原文 laid out: this fake's structured_content.json has no pages, so it comes from the Markdown.
+    lay = client.get(f"/api/library/{item['id']}/layout").json()
+    assert lay["file_id"] == f["id"] and lay["source"] == "markdown"
+    blocks = lay["pages"][0]["blocks"]
+    assert [b["t"] for b in blocks][:3] == ["title", "text", "figure"]
+    assert blocks[2]["name"] == "page_0_image_1.png" and blocks[2]["id"] == "F1"
+    assert blocks[2]["caption"] == [["", "Figure 1: Sleep minutes by phone use."]]
 
     img = client.get(f"/api/library/files/{f['id']}/mineru/images/page_0_image_1.png")
     assert img.content == PNG and img.headers["content-type"] == "image/png"
@@ -276,4 +285,73 @@ def test_reading_flow(client, fake, monkeypatch):
 
     monkeypatch.delenv(mineru.ENV_KEY)
     r = client.post(f"/api/library/{item['id']}/reading", json={"reconvert": True})
-    assert r.status_code == 400 and "MINERU_API_KEY" in r.json()["detail"]
+    assert r.status_code == 400 and "平台设置" in r.json()["detail"]
+
+
+SECRET = "sk-test-secret-1234"
+
+
+def test_saved_settings_override_the_environment_and_guard_the_secret(monkeypatch, tmp_path):
+    from ontology import providers
+
+    monkeypatch.setenv(mineru.ENV_KEY, "sk-from-env-abcd")
+    s = mineru.settings()
+    assert s["key_source"] == "environment" and s["env_hint"] == "••••abcd" and s["ready"]
+
+    s = mineru.save_settings({"url": "", "key_id": "kid-1", "secret": f"  {SECRET} "})
+    assert s["key_source"] == "settings" and s["key_id"] == "kid-1" and s["secret_hint"] == "••••1234"
+    assert mineru.api_key() == SECRET and SECRET not in json.dumps(s)
+    path = tmp_path / "mineru.json"
+    assert json.loads(path.read_text()) == {"key_id": "kid-1", "secret": SECRET}
+    assert path.stat().st_mode & 0o077 == 0
+    p = providers.PROVIDERS["mineru"].describe()
+    assert p["settings_view"] == "settings" and p["configured"] and p["key_hint"] == "••••1234"
+
+    # Saving again without a secret keeps it; the Key ID can change on its own.
+    assert mineru.save_settings({"url": "https://mineru.net/api", "key_id": "kid-2"})["secret_configured"]
+    assert mineru.api_key() == SECRET
+    # A new address without a new secret drops the old one, so it is never sent to another server.
+    s = mineru.save_settings({"url": "http://127.0.0.1:8000/", "key_id": "kid-2"})
+    assert not s["secret_configured"] and mineru.api_url() == "http://127.0.0.1:8000"
+    assert mineru.api_key() == "sk-from-env-abcd"  # the environment fills in again
+    mineru.save_settings({"url": "", "key_id": "kid-2", "secret": SECRET})
+    assert not mineru.save_settings({"url": "", "clear_secret": True})["secret_configured"]
+
+    for bad in ({"url": "ftp://x"}, {"url": "https://u:p@mineru.net"}, {"url": "https://mineru.net/?a=1"},
+                {"secret": "has space"}, {"key_id": "x" * 201}, {"secret": "密钥"}):
+        with pytest.raises(OntologyError):
+            mineru.save_settings({"url": "", **bad})
+
+
+def test_check_reports_the_account_and_spots_an_ignored_key(monkeypatch):
+    usage = {"object": "usage", "access_level": "standard", "current": {"pages_processed": 12}}
+    monkeypatch.setattr(mineru, "TEST_TRANSPORT", httpx.MockTransport(lambda req: httpx.Response(200, json=usage)))
+    mineru.save_settings({"url": "", "key_id": "kid", "secret": SECRET})
+    assert mineru.check() == "mineru.net 可用，密钥有效，账号级别 standard，本期已解析 12 页"
+    usage["access_level"] = "anonymous"
+    with pytest.raises(OntologyError, match="匿名"):
+        mineru.check()
+
+
+def test_mineru_settings_endpoints_are_local_only(conn, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from tests.conftest import TEST_URL
+    from workbench import server
+
+    monkeypatch.setenv("DATABASE_URL", TEST_URL)
+    page = {"origin": "http://127.0.0.1:8766"}
+    with TestClient(server.app, base_url="http://127.0.0.1:8766", client=("127.0.0.1", 1)) as c:
+        d = c.get("/api/settings/mineru").json()
+        assert d["editable"] and not d["secret_configured"] and d["default_url"]
+        body = {"url": "", "key_id": "kid", "secret": SECRET}
+        assert c.put("/api/settings/mineru", json=body).status_code == 403  # not sent by the page itself
+        r = c.put("/api/settings/mineru", json=body, headers=page)
+        assert r.status_code == 200 and r.json()["secret_hint"] == "••••1234" and SECRET not in r.text
+        assert SECRET not in c.get("/api/settings/mineru").text
+        assert c.put("/api/settings/mineru", json={"url": "ftp://x"}, headers=page).status_code == 400
+        monkeypatch.setattr(mineru, "TEST_TRANSPORT", httpx.MockTransport(
+            lambda req: httpx.Response(401, json={"msgCode": "A0202", "msg": "user authenticate failed"})))
+        assert c.post("/api/settings/mineru/test", headers=page).status_code == 400
+    with TestClient(server.app, base_url="http://example.com", client=("203.0.113.9", 1)) as remote:
+        assert remote.get("/api/settings/mineru").status_code == 403

@@ -56,7 +56,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     }
     const res = await request(q(path), init);
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(typeof body.detail === "string" ? body.detail : `请求失败（${res.status}）`);
+    if (!res.ok) throw Object.assign(new Error(typeof body.detail === "string" ? body.detail : `请求失败（${res.status}）`), { status: res.status });
     return body;
   }
   const fail = (e) => toast(e.message || String(e), true);
@@ -339,7 +339,30 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       return;
     }
     const reader = el("div", { class: "reader" }, el("p", { class: "dim" }, "读取正文…"));
-    body.append(reader);
+    const modes = el("div", { class: "text-modes", role: "radiogroup", "aria-label": "原文显示方式", hidden: true });
+    body.append(modes, reader);
+    reader.addEventListener("mouseup", () => setTimeout(() => offerExcerpt(reader), 0));
+    reader.addEventListener("scroll", () => { selBar.hidden = true; });
+    const hasPdf = it.files.some((f) => f.media_type === "application/pdf" || /\.pdf$/i.test(f.filename));
+    if (hasPdf && view.layout === undefined) {
+      try { view.layout = await api(`/api/library/${it.id}/layout`); } catch (e) {
+        if (e.status !== 404) { reader.replaceChildren(el("p", { class: "bad" }, e.message)); return; }
+        view.layout = null;
+      }
+      if (view.kind !== "item" || view.data !== it) return;
+    }
+    const layout = hasPdf ? view.layout : null;
+    const mode = layout ? (view.textMode || "layout") : "plain";
+    if (layout) {
+      modes.hidden = false;
+      modes.replaceChildren(...[["layout", "图文排版"], ["plain", "纯文本"]].map(([k, label]) => el("button", {
+        type: "button", role: "radio", "aria-checked": String(mode === k), onclick: () => { view.textMode = k; renderItem(); },
+      }, label)), el("span", { class: "dim" }, mode === "layout" ? "MinerU 解析：文字、图和表按论文原来的顺序排列" : "PDF 文字层，按页"));
+    }
+    if (mode === "layout") { paperReading.layout(reader, layout); return; }
+    if (hasPdf && !layout) {
+      body.insertBefore(el("p", { class: "dim text-hint" }, "在「精读」里用 MinerU 解析这篇 PDF 后，这里会把文字、图和表按论文原来的顺序排好。"), reader);
+    }
     try {
       const text = view.text || (view.text = await api(`/api/library/${it.id}/text?max_chars=200000`));
       if (view.kind !== "item" || view.data !== it) return;
@@ -356,14 +379,12 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       }
       reader.replaceChildren(...pages);
       if (text.truncated) reader.append(el("p", { class: "dim" }, "正文较长，只显示了前面一部分。"));
-      reader.addEventListener("mouseup", () => setTimeout(() => offerExcerpt(reader), 0));
-      reader.addEventListener("scroll", () => { selBar.hidden = true; });
     } catch (e) { reader.replaceChildren(el("p", { class: "bad" }, e.message)); }
   }
 
   function offerExcerpt(reader) {
     const sel = getSelection();
-    const quote = sel && !sel.isCollapsed ? sel.toString().replace(/\s+/g, " ").trim() : "";
+    const quote = sel && !sel.isCollapsed ? paperReading.quote(sel).replace(/\s+/g, " ").trim() : "";
     if (quote.length < 8 || !reader.contains(sel.anchorNode)) { selBar.hidden = true; return; }
     const pageBox = (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).closest(".pg");
     const page = pageBox?.dataset.page ? Number(pageBox.dataset.page) : null;

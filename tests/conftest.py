@@ -45,6 +45,7 @@ def _own_paper_cache(monkeypatch, tmp_path):
     from ontology import mineru
 
     monkeypatch.setenv(mineru.ENV_CACHE, str(tmp_path / "papers"))
+    monkeypatch.setenv(mineru.ENV_SETTINGS, str(tmp_path / "mineru.json"))
     monkeypatch.delenv(mineru.ENV_KEY, raising=False)
     monkeypatch.delenv(mineru.ENV_URL, raising=False)
     monkeypatch.setattr(mineru, "POLL_SECONDS", 0)

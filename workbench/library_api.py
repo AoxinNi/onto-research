@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
-from ontology import bibio, mineru, projects, resolve
+from ontology import bibio, mineru, paper_layout, projects, resolve
 from ontology import digest as digest_mod
 from ontology.errors import OntologyError
 from ontology.library import Library, file_limit
@@ -322,7 +322,7 @@ async def start_reading(item_id: str, body: ReadingIn, project: str = Project) -
         raise HTTPException(status_code=409, detail="这篇文献正在处理")
     convert = body.reconvert or not current["converted"]
     if convert and not mineru.status()["ready"]:
-        raise HTTPException(status_code=400, detail="需要 MinerU 的 API 密钥（MINERU_API_KEY）")
+        raise HTTPException(status_code=400, detail="需要 MinerU 密钥：在「平台设置」里填写 Key ID 和 Secret Key")
     client, model = model_client()
     sha = await asyncio.to_thread(_run, project, lambda lib, _: lib.conn.execute(
         "SELECT sha256 FROM library_files WHERE id = %s", (f["id"],)).fetchone()["sha256"])
@@ -407,6 +407,23 @@ def mineru_markdown(file_id: str, project: str = Project) -> Response:
     path = _cached_file(project, file_id, "markdown.md")
     stem = _run(project, lambda lib, _: lib._file_out(file_id)["filename"]).rsplit(".", 1)[0]
     return _attachment(path.read_bytes(), f"{stem}.md", "text/markdown; charset=utf-8")
+
+
+@router.get("/api/library/{item_id}/layout")
+def item_layout(item_id: str, project: str = Project, file_id: str | None = None) -> dict[str, Any]:
+    """The item's PDF as MinerU laid it out (text, figures, tables in reading order) for the 原文 tab. Without a
+    file_id it is the first PDF that has been converted. 404 when there is none."""
+    files = _run(project, lambda lib, _: _pdfs(lib, item_id))
+    if file_id:
+        files = [f for f in files if f["id"] == file_id]
+    f = next((x for x in files if mineru.manifest(x["sha256"])), None)
+    if not f:
+        raise HTTPException(status_code=404, detail="这条文献的 PDF 还没有用 MinerU 解析")
+    try:
+        out = paper_layout.layout(f["sha256"])
+    except OntologyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+    return {"file_id": f["id"], "filename": f["filename"], **out}
 
 
 @router.get("/api/library/{item_id}/text")

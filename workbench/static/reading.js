@@ -4,7 +4,7 @@
 
    Everything the model or the paper wrote goes into the page as text nodes, never as markup. */
 
-import { desktop, download, openExternal, request } from "/static/net.js";
+import { desktop, download, go, openExternal, request, routes } from "/static/net.js";
 
 const SVG = "http://www.w3.org/2000/svg";
 const SECTIONS = [
@@ -224,18 +224,6 @@ export function createReading({ api, q, toast, fail }) {
     } catch (e) { fail(e); load(); }
   }
 
-  async function saveKey(input) {
-    const key = input.value.trim();
-    if (!key) { input.focus(); return; }
-    try {
-      await api("/api/sources/mineru/key", { method: "PUT", json: { key } });
-      input.value = "";
-      toast("MinerU 密钥已保存");
-      current.data = null;
-      await load();
-    } catch (e) { fail(e); }
-  }
-
   function draw() {
     const { box, data: d } = current;
     const parts = [];
@@ -262,8 +250,6 @@ export function createReading({ api, q, toast, fail }) {
 
   function startCard(d) {
     const needKey = !d.converted && !d.mineru.ready;
-    const keyInput = el("input", { type: "password", class: "key-input", placeholder: "粘贴 MinerU API 密钥", autocomplete: "off",
-      spellcheck: "false", "aria-label": "MinerU API 密钥", onkeydown: (e) => { if (e.key === "Enter") saveKey(keyInput); } });
     return el("section", { class: "rd-start" },
       el("p", { class: "eyebrow" }, "CLOSE READING / 精读"),
       el("h3", {}, "让这篇论文先被读一遍"),
@@ -273,10 +259,11 @@ export function createReading({ api, q, toast, fail }) {
         ? el("p", { class: "dim" }, `已有 MinerU 转换结果（${when(d.converted.at)}），这次只需调用模型。`)
         : d.mineru.hosted && el("p", { class: "dim" }, `PDF 会上传到 ${d.mineru.host} 解析；结果保存在这台电脑上，同一个 PDF 只转换一次。`),
       needKey && (d.can_set_key
-        ? el("div", { class: "rd-key" }, keyInput,
-            el("button", { type: "button", class: "btn sm", onclick: () => saveKey(keyInput) }, "保存密钥"),
+        ? el("div", { class: "rd-key" },
+            el("span", { class: "dim" }, "还没有配置 MinerU 密钥。"),
+            el("button", { type: "button", class: "btn sm", onclick: () => go(`${routes.view("settings")}#mineru-settings`) }, "去平台设置配置"),
             el("button", { type: "button", class: "btn sm ghost", onclick: () => openExternal("https://mineru.net/apiManage/token") }, "去 mineru.net 申请"))
-        : el("p", { class: "warn" }, "需要在运行工作台的电脑上配置 MINERU_API_KEY")),
+        : el("p", { class: "warn" }, "需要运营者在部署环境中配置 MinerU")),
       el("div", { class: "rd-acts" },
         el("button", { type: "button", class: "btn primary", disabled: needKey, onclick: () => start(false) },
           d.status === "failed" ? "重试" : "开始精读")));
@@ -375,8 +362,144 @@ export function createReading({ api, q, toast, fail }) {
     dlg.showModal();
   }
 
+  // ---------------------------------------------------------------- 原文 as MinerU laid it out
+
+  /** Pictures load as they scroll into view: the desktop app fetches each one as base64. */
+  let seen = null;
+  function lazy(img, fileId, name) {
+    if (!desktop) { img.loading = "lazy"; image(img, fileId, name); return; }
+    seen ||= new IntersectionObserver((entries) => {
+      for (const e of entries) if (e.isIntersecting) { seen.unobserve(e.target); image(e.target, e.target.dataset.file, e.target.dataset.name); }
+    }, { rootMargin: "600px" });
+    img.dataset.file = fileId;
+    img.dataset.name = name;
+    seen.observe(img);
+  }
+
+  /** KaTeX (vendored, so it works offline) loads the first time a page has a formula. */
+  let katex;
+  function loadKatex() {
+    katex ||= new Promise((ok, fail) => {
+      document.head.append(el("link", { rel: "stylesheet", href: "/static/vendor/katex/katex.min.css" }));
+      document.head.append(el("script", { src: "/static/vendor/katex/katex.min.js", onload: () => ok(window.katex), onerror: fail }));
+    });
+    return katex;
+  }
+
+  /** A formula: the LaTeX source shows until KaTeX has drawn it, and stays when it can't (MinerU sometimes cuts one short). */
+  function mathOf(tex, display = false, failed = null) {
+    const node = el(display ? "div" : "span", { class: display ? "md-eq" : "md-math", title: tex }, tex);
+    loadKatex().then((k) => {
+      try {
+        k.render(tex, node, { displayMode: display, throwOnError: true, strict: "ignore", output: "html" });
+        node.classList.add("tex");
+      } catch { failed?.(node); }  // otherwise the source stays
+    }, () => failed?.(node));
+    return node;
+  }
+
+  const runsOf = (runs) => (runs || []).map(([k, s]) => (
+    k === "b" ? el("strong", {}, s) : k === "sup" ? el("sup", {}, s) : k === "sub" ? el("sub", {}, s)
+      : k === "math" ? mathOf(s) : s));
+  const plainOf = (runs) => (runs || []).map(([, s]) => s).join("");
+  // Table cells come as plain text; their $…$ spans are formulas too.
+  const cellOf = (text) => text.split(/(?<!\\)\$([^$\n]+?)(?<!\\)\$/).map((s, i) => (i % 2 ? mathOf(s) : s));
+
+  function tableOf(rows) {
+    return el("div", { class: "md-table" }, el("table", {}, el("tbody", {}, ...rows.map((r) => el("tr", {},
+      ...r.map((c) => el(c.head ? "th" : "td", { colspan: c.colspan, rowspan: c.rowspan }, ...cellOf(c.text))))))));
+  }
+
+  function picture(fileId, b, caption) {
+    const img = el("img", { alt: caption || b.id || "图" });
+    lazy(img, fileId, b.name);
+    return el("button", { type: "button", class: "md-img", onclick: () => zoom(img, { caption }), "aria-label": `放大${b.id ? ` ${b.id}` : ""}` }, img);
+  }
+
+  /** One figure, chart or table; `group` are pictures before it that share its caption (Figure 2 (a)(b)(c)). */
+  function figureOf(fileId, b, group = []) {
+    const caption = plainOf(b.caption);
+    const tag = group[0]?.id && b.id ? `${group[0].id}–${b.id}` : b.id;  // panels keep the 精读 tab's numbering
+    const cap = b.caption.length ? el("figcaption", {}, tag && el("span", { class: "tag" }, tag), ...runsOf(b.caption)) : null;
+    const notes = b.notes.length ? el("p", { class: "md-fig-note" }, ...runsOf(b.notes)) : null;
+    if (b.rows) {  // a table: caption above, the cells as text, and the picture MinerU cut out on request
+      const original = b.name && el("button", { type: "button", class: "btn sm ghost", onclick: async () => {
+        const img = el("img", { alt: caption || "表" });
+        await image(img, fileId, b.name);
+        zoom(img, { caption });
+      } }, "看原图");
+      return el("figure", { class: "md-fig table" }, cap, tableOf(b.rows), notes, original && el("div", { class: "md-fig-acts" }, original));
+    }
+    const pics = [...group, b].filter((x) => x.name).map((x) => picture(fileId, x, caption));
+    return el("figure", { class: `md-fig ${b.kind}` },
+      b.kind === "table" && cap, el("div", { class: `md-pics n${Math.min(pics.length, 4)}` }, ...pics), b.kind !== "table" && cap, notes);
+  }
+
+  function blockOf(fileId, b) {
+    if (b.t === "title") return el(`h${Math.min(b.level + 2, 6)}`, { class: `md-h md-h${b.level}` }, ...runsOf(b.runs));
+    if (b.t === "equation") {
+      // Drawn from the source; MinerU's cut-out picture stands in when KaTeX can't read it.
+      const pic = () => {
+        const img = el("img", { alt: "公式" });
+        lazy(img, fileId, b.name);
+        return el("div", { class: "md-eq pic" }, img);
+      };
+      if (!b.latex) return pic();
+      return mathOf(b.latex, true, b.name && ((node) => node.replaceWith(pic())));
+    }
+    if (b.t === "code") return el("pre", { class: "md-code" }, b.text);
+    return el("p", { class: b.t === "note" ? "md-note" : b.t === "ref" ? "md-ref" : null }, ...runsOf(b.runs));
+  }
+
+  /** The paper page by page, text with its figures and tables in place. Text is selectable for excerpts. */
+  function renderLayout(reader, d) {
+    const pages = d.pages.map((p) => {
+      const box = el("section", { class: "pg md-page", "data-page": p.page ?? "" }, p.page != null && el("div", { class: "pg-no" }, `第 ${p.page} 页`));
+      let group = [];
+      p.blocks.forEach((b, i) => {
+        const next = p.blocks[i + 1];
+        const isPic = b.t === "figure" && !b.rows;
+        // Uncaptioned pictures followed by another picture are panels of one figure: hold them for its caption.
+        if (isPic && !b.caption.length && next?.t === "figure" && !next.rows && b.name) { group.push(b); return; }
+        if (b.t === "figure") box.append(figureOf(d.file_id, b, isPic ? group : []));
+        else { for (const g of group) box.append(figureOf(d.file_id, g)); box.append(blockOf(d.file_id, b)); }
+        group = [];
+      });
+      for (const g of group) box.append(figureOf(d.file_id, g));
+      return box;
+    });
+    reader.replaceChildren(...pages);
+    if (d.truncated) reader.append(el("p", { class: "dim" }, "论文较长，只显示了前面一部分。"));
+    if (!reader.dataset.mathCopy) {  // copying drawn formulas gives their LaTeX, not KaTeX's glyph soup
+      reader.dataset.mathCopy = "1";
+      reader.addEventListener("copy", (e) => {
+        const sel = getSelection();
+        if (!sel || sel.isCollapsed || !reader.querySelector(".tex")) return;
+        e.clipboardData.setData("text/plain", selectedText(sel));
+        e.preventDefault();
+      });
+    }
+  }
+
+  /** The selection as text, with each drawn formula given back as $LaTeX$. */
+  function selectedText(sel) {
+    if (!sel.rangeCount) return "";
+    const range = sel.getRangeAt(0);
+    const box = el("div", {}, range.cloneContents());
+    // A selection inside one formula clones only its glyphs: count the whole formula.
+    const inMath = (range.commonAncestorContainer.nodeType === 1 ? range.commonAncestorContainer : range.commonAncestorContainer.parentElement)?.closest(".tex");
+    if (inMath) return inMath.classList.contains("md-eq") ? `$$${inMath.title}$$` : `$${inMath.title}$`;
+    if (!box.querySelector(".tex")) return sel.toString();
+    for (const m of box.querySelectorAll(".tex")) m.replaceWith(m.classList.contains("md-eq") ? `\n$$${m.title}$$\n` : `$${m.title}$`);
+    for (const b of box.querySelectorAll("p, div, li, h3, h4, h5, h6, figcaption, tr")) b.append("\n");
+    for (const c of box.querySelectorAll("td, th")) c.append("\t");
+    return box.textContent;
+  }
+
   return {
     render,
+    layout: renderLayout,
+    quote: selectedText,
     /** A library message for this item: fetch the reading again (draws only if something changed). */
     refresh(itemId) { if (current && current.item.id === itemId && current.box.isConnected) load(); },
     busy: () => busy(current?.data),
