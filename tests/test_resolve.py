@@ -180,6 +180,22 @@ def test_fetch_checks_hosts_redirects_and_size(monkeypatch):
         real_fetch("file:///etc/passwd", "*/*", 1000, any_host=True)
 
 
+def test_a_fake_ip_proxy_counts_as_public_on_a_local_workbench(monkeypatch):
+    """Clash / Surge in fake-IP mode answer DNS with 198.18.x.x; the proxy then reaches the real host."""
+    answers = {"github.com": "198.18.1.28", "intranet.example": "10.0.0.5"}
+    monkeypatch.setattr(resolve.socket, "getaddrinfo",
+                        lambda host, port, **kw: [(2, 1, 6, "", (answers[host], port))])
+    monkeypatch.delenv("WORKBENCH_CLOUDBASE_ENV_ID", raising=False)
+    monkeypatch.delenv("WORKBENCH_LIBRARY_FAKE_IP", raising=False)
+    assert resolve._public("github.com", 443)
+    assert not resolve._public("intranet.example", 443)  # a real private address is still refused
+    monkeypatch.setenv("WORKBENCH_LIBRARY_FAKE_IP", "0")
+    assert not resolve._public("github.com", 443)
+    monkeypatch.delenv("WORKBENCH_LIBRARY_FAKE_IP")
+    monkeypatch.setenv("WORKBENCH_CLOUDBASE_ENV_ID", "env-x")  # the cloud keeps the strict check
+    assert not resolve._public("github.com", 443)
+
+
 BIB = r"""
 @string{sm = "Sleep Medicine"}
 @comment{ignored @article{nope, title={x}} }

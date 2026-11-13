@@ -54,12 +54,27 @@ def fetch_any_enabled() -> bool:
     return os.environ.get("WORKBENCH_LIBRARY_FETCH_ANY", default) == "1"
 
 
+# Proxies such as Clash or Surge in fake-IP / TUN mode answer every DNS lookup with an address from this range
+# (RFC 2544, reserved for benchmarks) and connect to the real host themselves. Treated as public on a local
+# workbench, where such a proxy is common; the cloud entry, which may not reach private networks, keeps it out.
+FAKE_IP = ipaddress.ip_network("198.18.0.0/15")
+
+
+def fake_ip_allowed() -> bool:
+    default = "0" if os.environ.get("WORKBENCH_CLOUDBASE_ENV_ID") else "1"
+    return os.environ.get("WORKBENCH_LIBRARY_FAKE_IP", default) == "1"
+
+
 def _public(host: str, port: int) -> bool:
     try:
         infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
     except OSError:
         return False
-    return bool(infos) and all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+    fake_ok = fake_ip_allowed()
+    def ok(addr: str) -> bool:
+        ip = ipaddress.ip_address(addr)
+        return ip.is_global or (fake_ok and ip.version == 4 and ip in FAKE_IP)
+    return bool(infos) and all(ok(i[4][0]) for i in infos)
 
 
 def _check(url: str, any_host: bool) -> None:
