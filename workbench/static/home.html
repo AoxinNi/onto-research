@@ -241,6 +241,7 @@
       <label class="field"><span>新项目名称</span><input id="bb-name" maxlength="60" placeholder="留空则用「Big Bang · 项目 A + 项目 B」" autocomplete="off"></label>
       <label class="field"><span>描述</span><textarea id="bb-desc" rows="2" maxlength="300" placeholder="留空则写明由哪些项目合并而成"></textarea></label>
       <p class="hint">同类型同名的节点、同一 DOI 的文献会合成一个，笔记里的引用随之改写；引用键撞车的文献会换一个新引用键。PDF 只存一份，由新旧项目共用，合并几乎不占额外空间。对话记录和待审核的改动留在原项目。</p>
+      <p class="bb-error" id="bb-error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button type="button" class="btn" id="bb-cancel">取消</button>
         <button type="submit" class="btn primary" id="bb-ok" disabled>合并</button>

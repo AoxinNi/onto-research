@@ -322,6 +322,8 @@ dialog.wide { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48
 .bb-row input { width: 15px; height: 15px; margin: 0; accent-color: #f7931a; }
 .bb-name { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bb-meta { flex: none; color: var(--text-3); font-size: 12px; }
+.bb-error { margin: 14px 0 0; padding: 9px 12px; border: 1px solid rgba(255, 107, 107, .4); border-radius: 10px;
+  background: rgba(255, 107, 107, .08); color: var(--bad); font-size: 13px; line-height: 1.5; }
 .source-test { margin-top: 4px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); }
 .source-test .test-result { margin-bottom: 6px; }
 .source-test ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font: 11px/1.5 var(--mono); color: var(--text-2); }

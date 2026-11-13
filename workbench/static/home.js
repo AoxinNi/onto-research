@@ -271,6 +271,7 @@ $("#project-form").addEventListener("submit", async (e) => {
 
 const bbDialog = $("#bigbang-dialog");
 const bbChosen = () => [...$("#bb-list").querySelectorAll("input:checked")].map((c) => c.value);
+const bbError = (text) => { $("#bb-error").textContent = text || ""; $("#bb-error").hidden = !text; };
 function syncBigBang() {
   const n = bbChosen().length;
   $("#bb-ok").disabled = n < 2;
@@ -288,6 +289,7 @@ function openBigBang() {
   }));
   $("#bb-name").value = "";
   $("#bb-desc").value = "";
+  bbError("");
   syncBigBang();
   bbDialog.showModal();
 }
@@ -298,9 +300,16 @@ $("#bigbang-form").addEventListener("submit", async (e) => {
   const ok = $("#bb-ok");
   ok.disabled = true;
   ok.textContent = "合并中…";
+  bbError("");
   try {
-    const p = await api("/api/projects/bigbang", { method: "POST", body: JSON.stringify({
-      projects: bbChosen(), name: $("#bb-name").value.trim(), description: $("#bb-desc").value.trim() }) });
+    const res = await request("/api/projects/bigbang", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projects: bbChosen(), name: $("#bb-name").value.trim(), description: $("#bb-desc").value.trim() }) });
+    if (res.status === 401) go(routes.login, { replace: true });
+    if (res.status === 404 || res.status === 405) {
+      throw new Error("正在运行的工作台还没有合并功能：请重启工作台服务后再试。");
+    }
+    const p = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(p.detail || `合并失败（${res.status}）`);
     const m = p.merge;
     const joined = m.nodes_joined + m.sources_joined;
     bbDialog.close();
@@ -308,7 +317,7 @@ $("#bigbang-form").addEventListener("submit", async (e) => {
       + (joined ? `，其中 ${joined} 项重复的已合成一个` : ""));
     setTimeout(() => go(routes.project(p.id)), 1400);
   } catch (err) {
-    toast(err.message, true);
+    bbError(err.message);  // a toast would sit under the modal dialog's backdrop
     syncBigBang();
   }
 });
