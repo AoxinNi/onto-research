@@ -27,7 +27,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ontology import collector, custom_sources, evidence, history, mcp_clients, mcp_server, mineru, news, projects, reports, ths
+from ontology import bigbang, collector, custom_sources, evidence, history, mcp_clients, mcp_server, mineru, news, projects, reports, ths
 from ontology import providers as providers_mod
 from ontology import sources as sources_mod
 from ontology.db import connect
@@ -329,6 +329,18 @@ async def import_project(request: Request, name: str | None = None) -> dict[str,
     except ValueError:
         raise HTTPException(status_code=400, detail="文件不是有效的 JSON") from None
     return _registry(lambda c: projects.import_doc(c, doc, name))
+
+
+class BigBangIn(BaseModel):
+    projects: list[str]
+    name: str | None = None
+    description: str | None = None
+
+
+@app.post("/api/projects/bigbang")
+def bigbang_projects(body: BigBangIn) -> dict[str, Any]:
+    """Merge several projects into a new one (ontology/bigbang.py); the ones merged stay as they are."""
+    return _registry(lambda c: bigbang.merge(c, body.projects, body.name, body.description))
 
 
 @app.get("/api/projects/{project}/export")

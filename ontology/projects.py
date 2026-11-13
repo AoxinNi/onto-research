@@ -26,7 +26,7 @@ from psycopg.conninfo import make_conninfo
 
 from .db import connect, migrate
 from .errors import OntologyError
-from .library import Library
+from .library import Library, release_blobs
 from .manuscripts import Manuscripts
 from .registry import DEFAULT_PACK, LEGACY_PACK, PACKS, load_seed
 from .store import OntologyStore
@@ -440,3 +440,4 @@ def drop(conn: psycopg.Connection, project_id: str) -> None:
         raise OntologyError("refusing to drop a schema outside this application")
     conn.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(sql.Identifier(p["schema_name"])))
     conn.execute("DELETE FROM onto_research.projects WHERE id = %s", (project_id,))
+    release_blobs(conn)  # file contents only it still shared

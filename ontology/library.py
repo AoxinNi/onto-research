@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Any
 
 import psycopg
+from psycopg import sql
 from psycopg.types.json import Jsonb
 
 from .errors import OntologyError
@@ -553,16 +554,27 @@ class Library:
         return out | {"item": self.get_item(iid)}
 
     def file_bytes(self, file_id: str) -> dict[str, Any]:
-        r = self.conn.execute("SELECT filename, media_type, bytes FROM library_files WHERE id = %s", (file_id,)).fetchone()
+        r = self.conn.execute("SELECT filename, media_type, bytes, sha256 FROM library_files WHERE id = %s",
+                              (file_id,)).fetchone()
         if not r:
             raise OntologyError(f"no file '{file_id}'")
-        return {"filename": r["filename"], "media_type": r["media_type"], "bytes": bytes(r["bytes"])}
+        data = r["bytes"]
+        if data is None:  # stored once for several projects (a Big Bang merge)
+            blob = self.conn.execute("SELECT bytes FROM onto_research.file_blobs WHERE sha256 = %s", (r["sha256"],)).fetchone()
+            if not blob:
+                raise OntologyError(f"the file '{file_id}' has lost its contents")
+            data = blob["bytes"]
+        return {"filename": r["filename"], "media_type": r["media_type"], "bytes": bytes(data)}
 
     def delete_file(self, file_id: str) -> None:
         f = self._file_out(file_id)
+        sha = self.conn.execute("SELECT sha256, bytes IS NULL AS shared FROM library_files WHERE id = %s",
+                                (file_id,)).fetchone()
         with self.conn.transaction():
             self.conn.execute("UPDATE excerpts SET anchor = NULL WHERE file_id = %s", (file_id,))
             self.conn.execute("DELETE FROM library_files WHERE id = %s", (f["id"],))
+            if sha["shared"]:
+                release_blobs(self.conn, [sha["sha256"]])
 
     def text(self, item_id: str, page_from: int | None = None, page_to: int | None = None,
              query: str | None = None, max_chars: int = MAX_READ, file_id: str | None = None) -> dict[str, Any]:
@@ -828,6 +840,25 @@ class Library:
                           n.get("body") or "")
             self.write_note(n.get("title") or "笔记", body, bool(n.get("pinned")))
         return {"items": items, "excerpts": excerpts}
+
+
+# ------------------------------------------------------------------ shared file contents
+
+
+def release_blobs(conn: psycopg.Connection, shas: list[str] | None = None) -> int:
+    """Delete shared file contents (onto_research.file_blobs) that no project's library_files row reads any more:
+    the given ones, or all of them. Returns how many were deleted."""
+    if not conn.execute("SELECT to_regclass('onto_research.file_blobs') AS t").fetchone()["t"]:
+        return 0
+    schemas = [r["schema_name"] for r in conn.execute(
+        """SELECT p.schema_name FROM onto_research.projects p
+           WHERE to_regclass(quote_ident(p.schema_name) || '.library_files') IS NOT NULL""")]
+    used = sql.SQL(" UNION ALL ").join(
+        sql.SQL("SELECT sha256 FROM {} WHERE bytes IS NULL").format(sql.Identifier(s, "library_files")) for s in schemas)
+    query = sql.SQL("DELETE FROM onto_research.file_blobs b WHERE (%s::text[] IS NULL OR b.sha256 = ANY(%s))")
+    if schemas:
+        query += sql.SQL(" AND b.sha256 NOT IN ({})").format(used)
+    return conn.execute(query, (shas, shas)).rowcount
 
 
 # ------------------------------------------------------------------ small helpers

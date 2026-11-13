@@ -312,6 +312,16 @@ dialog.wide { width: min(620px, calc(100vw - 32px)); max-height: calc(100vh - 48
 #source-form .field-note { margin: -6px 0 14px; }
 #source-form [hidden] { display: none !important; }
 .dialog-actions .spacer { flex: 1; }
+
+/* Big Bang: pick the projects to merge */
+.bb-lede { margin: -8px 0 14px; }
+.bb-list { margin: 0 0 16px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; max-height: 260px; overflow-y: auto; }
+.bb-row { display: flex; align-items: center; gap: 10px; padding: 9px 10px; border-radius: 9px; cursor: pointer; font-size: 13.5px; }
+.bb-row:hover { background: rgba(255, 255, 255, .04); }
+.bb-row:has(input:checked) { background: rgba(247, 147, 26, .1); }
+.bb-row input { width: 15px; height: 15px; margin: 0; accent-color: #f7931a; }
+.bb-name { flex: 1; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bb-meta { flex: none; color: var(--text-3); font-size: 12px; }
 .source-test { margin-top: 4px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: rgba(255, 255, 255, .03); }
 .source-test .test-result { margin-bottom: 6px; }
 .source-test ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font: 11px/1.5 var(--mono); color: var(--text-2); }

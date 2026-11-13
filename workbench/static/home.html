@@ -47,6 +47,10 @@
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             创建本体项目
           </button>
+          <button type="button" class="btn lg" id="bigbang-btn" title="把几个项目的图谱、文献和笔记合并成一个新项目">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2" fill="currentColor"/><path d="M8 1.8v2.4M8 11.8v2.4M1.8 8h2.4M11.8 8h2.4M3.6 3.6l1.7 1.7M10.7 10.7l1.7 1.7M3.6 12.4l1.7-1.7M10.7 5.3l1.7-1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            Big Bang
+          </button>
           <button type="button" class="btn lg" id="import-btn">导入 JSON</button>
           <a class="btn lg" id="template-btn" href="/api/projects/template" download>下载导入模板</a>
           <input type="file" id="import-file" accept="application/json,.json" hidden>
@@ -225,6 +229,21 @@
       <div class="dialog-actions">
         <button type="button" class="btn" value="cancel" id="dialog-cancel">取消</button>
         <button type="submit" class="btn primary" id="dialog-ok">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="bigbang-dialog" class="wide">
+    <form method="dialog" id="bigbang-form">
+      <h2>Big Bang：合并项目</h2>
+      <p class="hint bb-lede">选两个或更多项目，它们的图谱、文献（含 PDF、精读）、摘录、笔记和论文会合并进一个新项目。原项目保持不变。</p>
+      <fieldset class="bb-list" id="bb-list" aria-label="要合并的项目"></fieldset>
+      <label class="field"><span>新项目名称</span><input id="bb-name" maxlength="60" placeholder="留空则用「Big Bang · 项目 A + 项目 B」" autocomplete="off"></label>
+      <label class="field"><span>描述</span><textarea id="bb-desc" rows="2" maxlength="300" placeholder="留空则写明由哪些项目合并而成"></textarea></label>
+      <p class="hint">同类型同名的节点、同一 DOI 的文献会合成一个，笔记里的引用随之改写；引用键撞车的文献会换一个新引用键。PDF 只存一份，由新旧项目共用，合并几乎不占额外空间。对话记录和待审核的改动留在原项目。</p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="bb-cancel">取消</button>
+        <button type="submit" class="btn primary" id="bb-ok" disabled>合并</button>
       </div>
     </form>
   </dialog>

@@ -267,6 +267,52 @@ $("#project-form").addEventListener("submit", async (e) => {
   finally { $("#dialog-ok").disabled = false; }
 });
 
+// ------------------------------------------------------------------ big bang: merge projects into a new one
+
+const bbDialog = $("#bigbang-dialog");
+const bbChosen = () => [...$("#bb-list").querySelectorAll("input:checked")].map((c) => c.value);
+function syncBigBang() {
+  const n = bbChosen().length;
+  $("#bb-ok").disabled = n < 2;
+  $("#bb-ok").textContent = n < 2 ? "至少选两个项目" : `合并 ${n} 个项目`;
+}
+function openBigBang() {
+  const active = projects.filter((p) => p.status === "active");
+  if (active.length < 2) { toast("至少要有两个进行中的项目才能合并", true); return; }
+  $("#bb-list").replaceChildren(...active.map((p) => {
+    const st = p.stats || {};
+    return el("label", { class: "bb-row" },
+      el("input", { type: "checkbox", value: p.id, onchange: syncBigBang }),
+      el("span", { class: "bb-name" }, p.name),
+      el("span", { class: "bb-meta" }, `${st.nodes ?? 0} 节点 · ${st.sources ?? 0} 文献`));
+  }));
+  $("#bb-name").value = "";
+  $("#bb-desc").value = "";
+  syncBigBang();
+  bbDialog.showModal();
+}
+$("#bigbang-btn").addEventListener("click", openBigBang);
+$("#bb-cancel").addEventListener("click", () => bbDialog.close());
+$("#bigbang-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ok = $("#bb-ok");
+  ok.disabled = true;
+  ok.textContent = "合并中…";
+  try {
+    const p = await api("/api/projects/bigbang", { method: "POST", body: JSON.stringify({
+      projects: bbChosen(), name: $("#bb-name").value.trim(), description: $("#bb-desc").value.trim() }) });
+    const m = p.merge;
+    const joined = m.nodes_joined + m.sources_joined;
+    bbDialog.close();
+    toast(`已合并为「${p.name}」：${p.stats.nodes} 个节点、${p.stats.sources} 篇文献、${m.notes} 条笔记`
+      + (joined ? `，其中 ${joined} 项重复的已合成一个` : ""));
+    setTimeout(() => go(routes.project(p.id)), 1400);
+  } catch (err) {
+    toast(err.message, true);
+    syncBigBang();
+  }
+});
+
 // ------------------------------------------------------------------ import
 
 $("#import-btn").addEventListener("click", () => $("#import-file").click());
