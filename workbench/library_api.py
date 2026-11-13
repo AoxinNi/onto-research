@@ -496,8 +496,14 @@ class NotePatch(BaseModel):
 
 
 @router.get("/api/notes")
-def list_notes(project: str = Project, q: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
-    return _run(project, lambda lib, _: lib.list_notes(q, limit))
+def list_notes(project: str = Project, q: str | None = None, limit: int = 100,
+               archived: bool = False) -> list[dict[str, Any]]:
+    return _run(project, lambda lib, _: lib.list_notes(q, limit, archived))
+
+
+@router.get("/api/notes/archived/count")
+def archived_note_count(project: str = Project) -> dict[str, int]:
+    return {"count": _run(project, lambda lib, _: lib.count_archived_notes())}
 
 
 @router.get("/api/notes/backlinks")

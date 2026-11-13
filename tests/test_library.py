@@ -121,6 +121,12 @@ def test_notes_keep_back_links(research):
     assert "补充" in lib.append_note(note["id"], "补充一句")["body"]
     lib.update_note(note["id"], archived=True)
     assert lib.list_notes() == [] and lib.get_item(item["id"])["notes"] == []
+    # an archived note can still be found, and restored
+    assert [n["id"] for n in lib.list_notes(archived=True)] == [note["id"]] and lib.count_archived_notes() == 1
+    assert lib.list_notes("睡眠", archived=True)[0]["title"] == "睡眠与屏幕"
+    lib.update_note(note["id"], archived=False)
+    assert [n["id"] for n in lib.list_notes()] == [note["id"]] and lib.list_notes(archived=True) == []
+    assert lib.count_archived_notes() == 0
 
 
 def test_groundings_are_reviewed_undone_and_recorded_in_history(research):

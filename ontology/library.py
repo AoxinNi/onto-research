@@ -722,12 +722,18 @@ class Library:
     def _note_out(self, r: dict[str, Any]) -> dict[str, Any]:
         return {k: _iso(v) for k, v in r.items()}
 
-    def list_notes(self, q: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_notes(self, q: str | None = None, limit: int = 100, archived: bool = False) -> list[dict[str, Any]]:
+        """Active notes, or with `archived` the archived ones (most recently archived first), so they can be restored."""
         pat = _like(q.strip()) if q and q.strip() else None
+        order = "updated_at DESC" if archived else "pinned DESC, updated_at DESC"
         return [self._note_out(r) for r in self.conn.execute(
-            """SELECT id, title, left(body, 240) AS preview, refs, author, pinned, created_at, updated_at FROM notes
-               WHERE status = 'active' AND (%s::text IS NULL OR title ILIKE %s OR body ILIKE %s)
-               ORDER BY pinned DESC, updated_at DESC LIMIT %s""", (pat, pat, pat, min(limit, 500)))]
+            f"""SELECT id, title, left(body, 240) AS preview, refs, author, pinned, created_at, updated_at FROM notes
+                WHERE status = %s AND (%s::text IS NULL OR title ILIKE %s OR body ILIKE %s)
+                ORDER BY {order} LIMIT %s""",
+            ("archived" if archived else "active", pat, pat, pat, min(limit, 500)))]
+
+    def count_archived_notes(self) -> int:
+        return self.conn.execute("SELECT count(*) AS n FROM notes WHERE status = 'archived'").fetchone()["n"]
 
     def get_note(self, note_id: str) -> dict[str, Any]:
         r = self.conn.execute("SELECT * FROM notes WHERE id = %s", (note_id,)).fetchone()

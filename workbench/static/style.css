@@ -799,6 +799,11 @@ body.panel-collapsed :is(#library, #writing) { right: var(--gutter); }
 .lib-list li:hover { background: rgba(255, 255, 255, .04); }
 .lib-list li[aria-selected="true"] { background: rgba(255, 255, 255, .08); }
 .lib-list li.lib-none { cursor: default; color: var(--text-3); font-size: 12.5px; background: none; }
+.lib-list li.lib-archive-toggle { cursor: default; padding: 6px 4px; background: none; }
+.lib-list li.lib-archive-toggle .btn { color: var(--text-3); }
+.lib-list li.lib-archive-toggle .btn:hover { color: var(--text); }
+.note-archived { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 12px; margin-bottom: 10px;
+  border-radius: 10px; background: rgba(240, 180, 80, .08); border: 1px solid rgba(240, 180, 80, .22); color: var(--text-2); font-size: 13px; }
 .li-title { font-size: 13px; font-weight: 500; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .li-meta { margin-top: 4px; font-size: 11.5px; color: var(--text-3); display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .li-kind, .li-read { font: 500 9.5px/1 var(--mono); padding: 3px 5px; border-radius: 4px; border: 1px solid var(--line); letter-spacing: .04em; }
@@ -1021,6 +1026,8 @@ svg.focus .rd-node:not(:hover):not(:focus) { opacity: .7; }
 #library .note-body { resize: none; height: 100%; font: 400 13.5px/1.7 var(--mono); }
 .note-preview { overflow: auto; font-size: 14px; line-height: 1.75; color: var(--text); padding: 2px 4px; }
 .note-preview p { margin: 0 0 12px; white-space: pre-wrap; }
+.note-preview .md-math, .note-preview .md-eq { white-space: normal; }
+.note-preview .md-eq { margin: 6px 0; text-align: center; }
 .ref { border: 1px solid var(--line-2); background: rgba(255, 255, 255, .04); border-radius: 6px; padding: 0 6px; font-size: 12.5px; color: var(--text); margin: 0 1px; }
 .ref.cite { color: var(--accent); font-family: var(--mono); font-size: 12px; }
 .ref.node { border-color: color-mix(in srgb, var(--c, #999) 50%, transparent); }

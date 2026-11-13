@@ -24,6 +24,9 @@ const el = (tag, attrs = {}, ...children) => {
 const READING = { unread: "未读", reading: "在读", read: "已读" };
 const IMPORT_TYPES = [".bib", ".bibtex", ".ris", ".nbib", ".json"];
 const FILE_TYPES = [".pdf", ".txt", ".md", ".markdown"];
+// Formulas in a note: $$display$$, \[display\], \(inline\), $inline$. An inline $…$ must hug its content and not
+// touch a digit or letter outside, so "costs $5 and $6" stays text.
+const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<![\\$\w])\$(?=\S)([^$\n]*?\S)\$(?![\w$])/g;
 const REF = /\[\[((?:n|ex|it)_[0-9a-f]{12})\]\]|(?<![\w.@])@([\w一-鿿][\w一-鿿:.#$%&+?<>~/-]*)/g;
 const shortAuthors = (s) => {
   const people = (s || "").split("; ").filter(Boolean);
@@ -43,6 +46,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
   let side = "items";          // which list: "items" or "notes"
   let filter = { q: "", kind: "", tag: "" };
   let items = [], tags = [], notes = [];
+  let notesArchived = false, archivedNotes = 0;  // the notes list can show archived notes, to restore them
   let view = { kind: "empty" }; // what the main pane shows
   let visible = false;
   let refreshTimer = null;
@@ -148,14 +152,20 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
           it.groundings ? el("span", { class: "acc" }, `${it.groundings} 依据`) : null),
       )));
     } else {
-      if (!notes.length) { listBox.replaceChildren(el("li", { class: "lib-none" }, filter.q ? "没有匹配的笔记" : "还没有笔记。")); return; }
-      listBox.replaceChildren(...notes.map((n) => el("li", {
+      const toggle = (on, label) => el("li", { class: "lib-archive-toggle" },
+        el("button", { type: "button", class: "btn sm ghost", onclick: () => { notesArchived = on; load(); } }, label));
+      const head = notesArchived ? toggle(false, "← 返回笔记") : null;
+      const foot = !notesArchived && archivedNotes ? toggle(true, `已归档的笔记（${archivedNotes}）`) : null;
+      const none = notesArchived ? (filter.q ? "没有匹配的归档笔记" : "没有归档的笔记。")
+        : filter.q ? "没有匹配的笔记" : "还没有笔记。";
+      listBox.replaceChildren(...[head, ...(notes.length ? notes.map((n) => el("li", {
         role: "option", "aria-selected": String(view.kind === "note" && view.id === n.id), tabindex: "0",
         onclick: () => openNote(n.id), onkeydown: (e) => { if (e.key === "Enter") openNote(n.id); },
       },
-        el("div", { class: "li-title" }, n.pinned ? "📌 " : "", n.title),
+        el("div", { class: "li-title" }, n.pinned && !notesArchived ? "📌 " : "", n.title),
         el("div", { class: "li-preview" }, n.preview.replace(/\s+/g, " ").slice(0, 120)),
-        el("div", { class: "li-meta" }, `${n.author === "human" ? "你" : "Agent"} · ${ago(n.updated_at)}`))));
+        el("div", { class: "li-meta" }, `${n.author === "human" ? "你" : "Agent"} · ${notesArchived ? "归档于 " : ""}${ago(n.updated_at)}`)))
+        : [el("li", { class: "lib-none" }, none)]), foot].filter(Boolean));
     }
   }
 
@@ -177,7 +187,11 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
           items = out.items; tags = out.tags;
         }
       } else {
-        notes = await api(`/api/notes${filter.q ? `?q=${encodeURIComponent(filter.q)}` : ""}`);
+        const p = new URLSearchParams();
+        if (filter.q) p.set("q", filter.q);
+        if (notesArchived) p.set("archived", "true");
+        [notes, { count: archivedNotes }] = await Promise.all([api(`/api/notes?${p}`), api("/api/notes/archived/count")]);
+        if (notesArchived && !archivedNotes) { notesArchived = false; return load(); }  // the last one was restored
       }
       renderSide();
     } catch (e) { fail(e); }
@@ -655,12 +669,25 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     const pin = el("button", { type: "button", class: "btn sm", onclick: async () => {
       try { view.data = await api(`/api/notes/${n.id}`, { method: "PATCH", json: { pinned: !n.pinned } }); load(); renderNote(); } catch (e) { fail(e); }
     } }, n.pinned ? "取消置顶" : "置顶");
-    const del = el("button", { type: "button", class: "btn sm", onclick: async () => {
-      if (!await confirmAction(`归档笔记「${n.title}」？`)) return;
-      try { await api(`/api/notes/${n.id}`, { method: "PATCH", json: { archived: true } }); show({ kind: "empty" }); load(); } catch (e) { fail(e); }
-    } }, "归档");
+    const archived = n.status === "archived";
+    const restore = async () => {
+      try {
+        await api(`/api/notes/${n.id}`, { method: "PATCH", json: { archived: false } });
+        toast(`已恢复「${n.title}」`);
+        notesArchived = false;
+        await load();
+        openNote(n.id);
+      } catch (e) { fail(e); }
+    };
+    const del = archived ? el("button", { type: "button", class: "btn sm primary", onclick: restore }, "恢复")
+      : el("button", { type: "button", class: "btn sm", onclick: async () => {
+        if (!await confirmAction(`归档笔记「${n.title}」？之后可以在笔记列表底部的「已归档的笔记」里恢复。`)) return;
+        try { await api(`/api/notes/${n.id}`, { method: "PATCH", json: { archived: true } }); show({ kind: "empty" }); load(); } catch (e) { fail(e); }
+      } }, "归档");
     main.replaceChildren(el("div", { class: "note" },
-      el("div", { class: "note-bar" }, title, status, cite, pin, del,
+      archived && el("div", { class: "note-archived" }, "这篇笔记已归档，不在笔记列表里。",
+        el("button", { type: "button", class: "btn sm", onclick: restore }, "恢复到笔记")),
+      el("div", { class: "note-bar" }, title, status, cite, !archived && pin, del,
         el("button", { type: "button", class: "btn sm", onclick: () => askAgent("请在这篇笔记末尾补充一段，把相关文献和图中的节点联系起来。", false) }, "让 Agent 补充")),
       el("div", { class: "note-split" }, body, preview)));
     renderPreview(preview, n.body);
@@ -693,35 +720,51 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     input.focus();
   }
 
-  /* Paragraphs of plain text with chips for [@citekey], [[n_…]], [[ex_…]], [[it_…]]. Markdown is shown as typed. */
+  /* Paragraphs of plain text with chips for [@citekey], [[n_…]], [[ex_…]], [[it_…]], and formulas ($…$, $$…$$,
+     \(…\), \[…\]) drawn by KaTeX. Other Markdown is shown as typed. */
   function renderPreview(box, text) {
     const byId = new Map(nodes().map((n) => [n.id, n]));
     box.replaceChildren(...(text || "").split(/\n{2,}/).map((para) => {
       const p = el("p");
-      let last = 0;
-      for (const m of para.matchAll(REF)) {
-        let before = para.slice(last, m.index);
-        last = m.index + m[0].length;
-        if (m[2]) {
-          const key = m[2].replace(/[.,;:]+$/, "");
-          const tail = m[2].slice(key.length);
-          if (before.endsWith("[") && !tail && para[last] === "]") { before = before.slice(0, -1); last += 1; } // [@key] -> chip
-          p.append(before, el("button", { type: "button", class: "ref cite", onclick: () => openCitekey(key) }, `@${key}`), tail);
-          continue;
-        }
-        p.append(before);
-        if (m[1].startsWith("n_")) {
-          const n = byId.get(m[1]);
-          p.append(el("button", { type: "button", class: "ref node", style: n ? `--c:${typeOf(n.type).color}` : "", onclick: () => openNode(m[1]) }, n ? n.name : "已删除的节点"));
-        } else if (m[1].startsWith("ex_")) {
-          p.append(el("button", { type: "button", class: "ref ex", onclick: () => openExcerpt(m[1]) }, "摘录"));
-        } else {
-          p.append(el("button", { type: "button", class: "ref cite", onclick: () => openItem(m[1]) }, "文献"));
-        }
+      let at = 0, block = false;
+      // A display formula is its own block, so the line breaks around it would show as blank lines (pre-wrap).
+      const text = (s, display) => refsInto(p, (block ? s.replace(/^\n/, "") : s).replace(display ? /\n$/ : /$^/, ""), byId);
+      for (const m of para.matchAll(MATH)) {
+        const display = m[1] != null || m[2] != null;
+        text(para.slice(at, m.index), display);
+        at = m.index + m[0].length;
+        block = display;
+        p.append(paperReading.math((m[1] ?? m[2] ?? m[3] ?? m[4]).trim(), display));
       }
-      p.append(para.slice(last));
+      text(para.slice(at), false);
       return p;
     }));
+  }
+
+  /** Text with its [@citekey], [[n_…]], [[ex_…]] and [[it_…]] turned into chips, appended to `p`. */
+  function refsInto(p, para, byId) {
+    let last = 0;
+    for (const m of para.matchAll(REF)) {
+      let before = para.slice(last, m.index);
+      last = m.index + m[0].length;
+      if (m[2]) {
+        const key = m[2].replace(/[.,;:]+$/, "");
+        const tail = m[2].slice(key.length);
+        if (before.endsWith("[") && !tail && para[last] === "]") { before = before.slice(0, -1); last += 1; } // [@key] -> chip
+        p.append(before, el("button", { type: "button", class: "ref cite", onclick: () => openCitekey(key) }, `@${key}`), tail);
+        continue;
+      }
+      p.append(before);
+      if (m[1].startsWith("n_")) {
+        const n = byId.get(m[1]);
+        p.append(el("button", { type: "button", class: "ref node", style: n ? `--c:${typeOf(n.type).color}` : "", onclick: () => openNode(m[1]) }, n ? n.name : "已删除的节点"));
+      } else if (m[1].startsWith("ex_")) {
+        p.append(el("button", { type: "button", class: "ref ex", onclick: () => openExcerpt(m[1]) }, "摘录"));
+      } else {
+        p.append(el("button", { type: "button", class: "ref cite", onclick: () => openItem(m[1]) }, "文献"));
+      }
+    }
+    p.append(para.slice(last));
   }
 
   async function openCitekey(key) {

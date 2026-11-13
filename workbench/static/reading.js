@@ -500,6 +500,7 @@ export function createReading({ api, q, toast, fail }) {
     render,
     layout: renderLayout,
     quote: selectedText,
+    math: mathOf,
     /** A library message for this item: fetch the reading again (draws only if something changed). */
     refresh(itemId) { if (current && current.item.id === itemId && current.box.isConnected) load(); },
     busy: () => busy(current?.data),
