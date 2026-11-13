@@ -8,6 +8,7 @@
 
 import { STANCES, typeOf } from "/static/vocab.js";
 import { confirmAction, download, request } from "/static/net.js";
+import { renderMarkdown } from "/static/markdown.js";
 
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -73,151 +74,6 @@ function diffView(a, b) {
   const box = el("div", { class: "ms-diff" });
   for (const p of diff(a, b)) box.append(p.op === "eq" ? p.text : el(p.op === "ins" ? "ins" : "del", {}, p.text));
   return box;
-}
-
-// ------------------------------------------------------------------ Markdown preview
-
-function matchBracket(s, open) {
-  let depth = 0;
-  for (let i = open; i < s.length; i++) {
-    if (s[i] === "\\") { i++; continue; }
-    if (s[i] === "[") depth++;
-    else if (s[i] === "]" && --depth === 0) return i;
-  }
-  return -1;
-}
-
-/* Inline Markdown into nodes. ctx.cite(keys, locators, inText) and ctx.claim(nodeId, children) draw the two
-   kinds of reference; everything else is emphasis, code and plain text. */
-function inline(s, ctx) {
-  const out = [];
-  let text = "";
-  const flush = () => { if (text) { out.push(text); text = ""; } };
-  for (let i = 0; i < s.length;) {
-    const c = s[i];
-    if (c === "\\" && i + 1 < s.length) { text += s[i + 1]; i += 2; continue; }
-    if (c === "`") {
-      const end = s.indexOf("`", i + 1);
-      if (end > i) { flush(); out.push(el("code", {}, s.slice(i + 1, end))); i = end + 1; continue; }
-    }
-    if (c === "!" && s[i + 1] === "[") {
-      const close = matchBracket(s, i + 1);
-      if (close > 0 && s[close + 1] === "(") {
-        const end = s.indexOf(")", close);
-        if (end > 0) { flush(); out.push(el("span", { class: "ms-img" }, `［图片：${s.slice(i + 2, close) || "无说明"}］`)); i = end + 1; continue; }
-      }
-    }
-    if (c === "[") {
-      const close = matchBracket(s, i);
-      if (close > 0) {
-        const inner = s.slice(i + 1, close);
-        if (s[close + 1] === "{") {
-          const end = s.indexOf("}", close);
-          if (end > 0) {
-            const attrs = s.slice(close + 2, end).split(/\s+/);
-            const node = (attrs.find((a) => a.startsWith("node=")) || "").slice(5).replace(/["']/g, "");
-            flush();
-            out.push(attrs.includes(".claim") && node ? ctx.claim(node, inline(inner, ctx)) : el("span", {}, ...inline(inner, ctx)));
-            i = end + 1;
-            continue;
-          }
-        }
-        if (s[close + 1] === "(") {
-          const end = s.indexOf(")", close);
-          if (end > 0) { flush(); out.push(el("span", { class: "ms-link", title: s.slice(close + 2, end) }, ...inline(inner, ctx))); i = end + 1; continue; }
-        }
-        if (/@/.test(inner) && !/\[/.test(inner)) {
-          const keys = [], locs = {};
-          for (const part of inner.split(";")) {
-            const m = part.match(new RegExp(`-?@(${KEY})(.*)`));
-            if (!m) continue;
-            const key = m[1].replace(/[.,:]+$/, "");
-            keys.push(key);
-            const loc = (m[1].slice(key.length) + m[2]).replace(/^[\s,，]+/, "").trim();
-            if (loc) locs[key] = loc;
-          }
-          if (keys.length) { flush(); out.push(ctx.cite(keys, locs, false)); i = close + 1; continue; }
-        }
-      }
-    }
-    if (c === "@" && !/[\w.@]/.test(s[i - 1] || "")) {
-      const m = s.slice(i).match(new RegExp(`^@(${KEY})`));
-      if (m) {
-        const key = m[1].replace(/[.,;:]+$/, "");
-        flush(); out.push(ctx.cite([key], {}, true)); i += 1 + key.length; continue;
-      }
-    }
-    if ((c === "*" || c === "_") && s[i + 1] === c) {
-      const end = s.indexOf(c + c, i + 2);
-      if (end > i + 2) { flush(); out.push(el("strong", {}, ...inline(s.slice(i + 2, end), ctx))); i = end + 2; continue; }
-    }
-    if (c === "*" || (c === "_" && !/\w/.test(s[i - 1] || ""))) {
-      const end = s.indexOf(c, i + 1);
-      if (end > i + 1 && s[i + 1] !== " ") { flush(); out.push(el("em", {}, ...inline(s.slice(i + 1, end), ctx))); i = end + 1; continue; }
-    }
-    text += c;
-    i++;
-  }
-  flush();
-  return out;
-}
-
-const joinLines = (lines) => lines.reduce((acc, line) => {
-  if (!acc) return line.trim();
-  const cjk = /[　-鿿，。；：！？）」』]$/.test(acc) || /^[　-鿿（「『]/.test(line.trim());
-  return acc + (cjk ? "" : " ") + line.trim();
-}, "");
-
-export function renderMarkdown(text, ctx) {
-  const lines = (text || "").replace(/\r\n/g, "\n").split("\n");
-  const blocks = [];
-  let para = [];
-  const endPara = () => { if (para.length) { blocks.push(el("p", {}, ...inline(joinLines(para), ctx))); para = []; } };
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (/^\s*(```|~~~)/.test(line)) {
-      endPara();
-      const fence = line.trim().slice(0, 3), code = [];
-      while (++i < lines.length && !lines[i].trim().startsWith(fence)) code.push(lines[i]);
-      blocks.push(el("pre", {}, el("code", {}, code.join("\n"))));
-      continue;
-    }
-    if (/^\s*<!--/.test(line)) {
-      endPara();
-      const note = [line];
-      while (!note[note.length - 1].includes("-->") && i + 1 < lines.length) note.push(lines[++i]);
-      blocks.push(el("div", { class: "ms-intent" }, note.join(" ").replace(/<!--|-->/g, "").trim()));
-      continue;
-    }
-    const h = line.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { endPara(); blocks.push(el(`h${Math.min(6, h[1].length + 3)}`, {}, ...inline(h[2], ctx))); continue; }
-    const li = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
-    if (li) {
-      endPara();
-      const ordered = /\d/.test(li[1]), list = el(ordered ? "ol" : "ul");
-      let j = i;
-      for (; j < lines.length; j++) {
-        const m = lines[j].match(/^\s*([-*+]|\d+[.)])\s+(.*)$/);
-        if (!m) break;
-        list.append(el("li", {}, ...inline(m[2], ctx)));
-      }
-      blocks.push(list);
-      i = j - 1;
-      continue;
-    }
-    if (/^\s*>/.test(line)) {
-      endPara();
-      const quote = [];
-      for (; i < lines.length && /^\s*>/.test(lines[i]); i++) quote.push(lines[i].replace(/^\s*>\s?/, ""));
-      i--;
-      blocks.push(el("blockquote", {}, ...inline(joinLines(quote), ctx)));
-      continue;
-    }
-    if (!line.trim()) { endPara(); continue; }
-    para.push(line);
-  }
-  endPara();
-  return blocks;
 }
 
 // ------------------------------------------------------------------ the mode
@@ -464,8 +320,8 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
       onclick: () => openNode(nodeId), onkeydown: (e) => { if (e.key === "Enter") openNode(nodeId); } }, ...children);
   }
 
-  const ctx = { cite: citeChip, claim: claimSpan };
-  const draftCtx = { cite: (keys, locs, inText) => citeChip(keys, locs, inText, true), claim: claimSpan };
+  const ctx = { cite: citeChip, claim: claimSpan, intent: true };
+  const draftCtx = { cite: (keys, locs, inText) => citeChip(keys, locs, inText, true), claim: claimSpan, intent: true };
 
   function renderAllPreviews() {
     for (const st of state.values()) if (st.preview) st.preview.replaceChildren(...renderMarkdown(st.body, ctx));

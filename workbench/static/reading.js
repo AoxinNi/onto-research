@@ -5,6 +5,7 @@
    Everything the model or the paper wrote goes into the page as text nodes, never as markup. */
 
 import { desktop, download, go, openExternal, request, routes } from "/static/net.js";
+import { inline as inlineMarkdown, mathNode, renderMarkdown } from "/static/markdown.js";
 
 const SVG = "http://www.w3.org/2000/svg";
 const SECTIONS = [
@@ -39,18 +40,11 @@ const svg = (tag, attrs = {}, ...children) => {
   return node;
 };
 
-/** "a **b** c" as text nodes with <strong> for the bold parts. */
-function inline(text) {
-  const out = [];
-  let last = 0;
-  for (const m of String(text || "").matchAll(/\*\*(.+?)\*\*/g)) {
-    if (m.index > last) out.push(text.slice(last, m.index));
-    out.push(el("strong", {}, m[1]));
-    last = m.index + m[0].length;
-  }
-  if (last < String(text || "").length) out.push(String(text).slice(last));
-  return out;
-}
+/** A reading's text: one line as a paragraph with emphasis, `code` and formulas; several lines as Markdown
+    (lists, tables, display formulas). */
+const rich = (text) => (/\n/.test(text || "")
+  ? el("div", { class: "md" }, ...renderMarkdown(text, { breaks: true }))
+  : el("p", {}, ...inlineMarkdown(text)));
 
 const when = (iso) => (iso ? new Date(iso).toLocaleString("zh-CN", { dateStyle: "medium", timeStyle: "short" }) : "");
 
@@ -318,13 +312,13 @@ export function createReading({ api, q, toast, fail }) {
   function points(key, list) {
     if (!list?.length) return null;
     if (key === "logic") {
-      return el("ol", { class: "rd-chain" }, ...list.map((p) => el("li", {}, p.title && el("b", {}, p.title), el("p", {}, ...inline(p.text)))));
+      return el("ol", { class: "rd-chain" }, ...list.map((p) => el("li", {}, p.title && el("b", {}, p.title), rich(p.text))));
     }
     if (key === "conclusions") {
       return el("div", { class: "rd-cards" }, ...list.map((p, i) => el("div", { class: "rd-card" },
-        el("span", { class: "no" }, String(i + 1)), el("div", {}, p.title && el("b", {}, p.title), el("p", {}, ...inline(p.text))))));
+        el("span", { class: "no" }, String(i + 1)), el("div", {}, p.title && el("b", {}, p.title), rich(p.text)))));
     }
-    return el("dl", { class: "rd-points" }, ...list.flatMap((p) => [el("dt", {}, p.title || ""), el("dd", {}, ...inline(p.text))]));
+    return el("dl", { class: "rd-points" }, ...list.flatMap((p) => [el("dt", {}, p.title || ""), el("dd", {}, rich(p.text))]));
   }
 
   function figureList(d) {
@@ -341,7 +335,7 @@ export function createReading({ api, q, toast, fail }) {
           el("div", { class: "rd-fig-meta" }, el("span", { class: "tag" }, f.id), f.page && el("span", { class: "dim" }, `第 ${f.page} 页`)),
           f.caption && el("p", { class: "rd-fig-cap" }, f.caption),
           f.title && el("b", {}, f.title),
-          f.text && el("p", {}, ...inline(f.text))));
+          f.text && rich(f.text)));
     }));
   }
 
@@ -376,27 +370,8 @@ export function createReading({ api, q, toast, fail }) {
     seen.observe(img);
   }
 
-  /** KaTeX (vendored, so it works offline) loads the first time a page has a formula. */
-  let katex;
-  function loadKatex() {
-    katex ||= new Promise((ok, fail) => {
-      document.head.append(el("link", { rel: "stylesheet", href: "/static/vendor/katex/katex.min.css" }));
-      document.head.append(el("script", { src: "/static/vendor/katex/katex.min.js", onload: () => ok(window.katex), onerror: fail }));
-    });
-    return katex;
-  }
-
-  /** A formula: the LaTeX source shows until KaTeX has drawn it, and stays when it can't (MinerU sometimes cuts one short). */
-  function mathOf(tex, display = false, failed = null) {
-    const node = el(display ? "div" : "span", { class: display ? "md-eq" : "md-math", title: tex }, tex);
-    loadKatex().then((k) => {
-      try {
-        k.render(tex, node, { displayMode: display, throwOnError: true, strict: "ignore", output: "html" });
-        node.classList.add("tex");
-      } catch { failed?.(node); }  // otherwise the source stays
-    }, () => failed?.(node));
-    return node;
-  }
+  // A formula: the LaTeX source shows until KaTeX has drawn it, and stays when it can't (MinerU sometimes cuts one short).
+  const mathOf = mathNode;
 
   const runsOf = (runs) => (runs || []).map(([k, s]) => (
     k === "b" ? el("strong", {}, s) : k === "sup" ? el("sup", {}, s) : k === "sub" ? el("sub", {}, s)
@@ -500,7 +475,6 @@ export function createReading({ api, q, toast, fail }) {
     render,
     layout: renderLayout,
     quote: selectedText,
-    math: mathOf,
     /** A library message for this item: fetch the reading again (draws only if something changed). */
     refresh(itemId) { if (current && current.item.id === itemId && current.box.isConnected) load(); },
     busy: () => busy(current?.data),

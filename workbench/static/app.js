@@ -4,6 +4,7 @@ import { TYPES, LINKS, LAYERS, PROVENANCE, NEEDS_GROUNDING, STANCES, lowerLayer,
 import { currentProject, go, request, routes, socket } from "/static/net.js";
 import { initLibrary } from "/static/library.js";
 import { initWriting } from "/static/writing.js";
+import { renderMarkdown } from "/static/markdown.js";
 
 // Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
 const PROJECT = currentProject();
@@ -1153,10 +1154,20 @@ const logBox = $("#log");
 const nearBottom = () => logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 80;
 function scrollLog(force) { if (force || nearBottom()) logBox.scrollTo({ top: logBox.scrollHeight, behavior: REDUCED ? "auto" : "smooth" }); }
 
+/** The agent's reply as Markdown: tables, lists, formulas…; [[n_…]] names the node and flies to it, and
+    [@key] opens the source in the library. */
 function richText(text) {
-  const span = el("div");
-  span.innerHTML = esc(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
-  return [...span.childNodes];
+  const cite = (key, loc) => el("button", { type: "button", class: "chat-ref cite", title: loc || null,
+    onclick: () => { setMode("library"); library.openCitekey(key); } }, `@${key}`, loc ? el("small", {}, ` ${loc}`) : null);
+  return renderMarkdown(text, {
+    breaks: true,
+    cite: (keys, locs) => (keys.length === 1 ? cite(keys[0], locs[keys[0]]) : el("span", {}, ...keys.map((k) => cite(k, locs[k])))),
+    ref: (id) => {
+      const n = nodes.get(id);
+      if (!id.startsWith("n_") || !n) return el("code", {}, id);
+      return el("button", { type: "button", class: "chat-ref", onclick: () => select({ kind: "node", id }, true) }, n.name);
+    },
+  });
 }
 
 // ------------------------------------------------------------------ research report
@@ -1556,7 +1567,7 @@ $("#new-session").addEventListener("click", () => {
 
 function log(kind, text) {
   const stick = nearBottom();
-  const line = el("div", { class: `msg ${kind}` }, ...(kind === "assistant" ? richText(text) : [text]));
+  const line = el("div", { class: `msg ${kind}${kind === "assistant" ? " md" : ""}` }, ...(kind === "assistant" ? richText(text) : [text]));
   logBox.insertBefore(line, thinking?.isConnected ? thinking : null);
   scrollLog(stick || kind === "user");
   if (kind !== "tool") closeToolGroup();

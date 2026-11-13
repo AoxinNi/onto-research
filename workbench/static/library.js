@@ -7,6 +7,7 @@
 import { KINDS, STANCES, typeOf } from "/static/vocab.js";
 import { confirmAction, download, onFileDrop, openExternal, pickAndUpload, request } from "/static/net.js";
 import { createReading } from "/static/reading.js";
+import { renderMarkdown } from "/static/markdown.js";
 
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -24,10 +25,6 @@ const el = (tag, attrs = {}, ...children) => {
 const READING = { unread: "未读", reading: "在读", read: "已读" };
 const IMPORT_TYPES = [".bib", ".bibtex", ".ris", ".nbib", ".json"];
 const FILE_TYPES = [".pdf", ".txt", ".md", ".markdown"];
-// Formulas in a note: $$display$$, \[display\], \(inline\), $inline$. An inline $…$ must hug its content and not
-// touch a digit or letter outside, so "costs $5 and $6" stays text.
-const MATH = /\$\$([\s\S]+?)\$\$|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)|(?<![\\$\w])\$(?=\S)([^$\n]*?\S)\$(?![\w$])/g;
-const REF = /\[\[((?:n|ex|it)_[0-9a-f]{12})\]\]|(?<![\w.@])@([\w一-鿿][\w一-鿿:.#$%&+?<>~/-]*)/g;
 const shortAuthors = (s) => {
   const people = (s || "").split("; ").filter(Boolean);
   if (!people.length) return "佚名";
@@ -47,6 +44,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
   let filter = { q: "", kind: "", tag: "" };
   let items = [], tags = [], notes = [];
   let notesArchived = false, archivedNotes = 0;  // the notes list can show archived notes, to restore them
+  const NOTE_MODE_KEY = "onto.note.mode";  // the note pane opens in the mode it was last left in (编辑 or 阅读)
   let view = { kind: "empty" }; // what the main pane shows
   let visible = false;
   let refreshTimer = null;
@@ -651,21 +649,47 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     const n = view.data;
     const title = el("input", { type: "text", class: "note-title", value: n.title, "aria-label": "标题" });
     const body = el("textarea", { class: "note-body", value: n.body, "aria-label": "正文", placeholder: "用 [@引用键] 引用文献，[[n_…]] 指向节点。" });
-    const preview = el("div", { class: "note-preview" });
+    const preview = el("div", { class: "note-preview md" });
     const status = el("span", { class: "dim" }, n.author === "human" ? "" : "Agent 写的笔记");
     let timer = null, saving = Promise.resolve();
     const save = () => {
       clearTimeout(timer);
       status.textContent = "保存中…";
       saving = saving.then(() => api(`/api/notes/${n.id}`, { method: "PATCH", json: { title: title.value || "无标题", body: body.value } }))
-        .then((saved) => { view.data = saved; status.textContent = "已保存"; renderPreview(preview, saved.body); refreshNotesSoon(); })
+        .then((saved) => { view.data = saved; status.textContent = "已保存"; refreshNotesSoon(); })
         .catch((e) => { status.textContent = "保存失败"; fail(e); });
     };
     const later = () => { clearTimeout(timer); status.textContent = "未保存"; timer = setTimeout(save, 900); };
     title.addEventListener("input", later);
-    body.addEventListener("input", () => { later(); renderPreview(preview, body.value); });
-    body.addEventListener("keydown", (e) => { if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(); } });
+    body.addEventListener("input", later);
     const cite = el("button", { type: "button", class: "btn sm", onclick: () => citePicker(body, later) }, "插入引用");
+    /* One pane: the Markdown source (编辑) or how it reads (阅读). Empty and new notes open for writing;
+       others open the way the last one was left. Cmd/Ctrl+E switches, Cmd/Ctrl+S saves. */
+    let mode = focus || !n.body.trim() ? "edit" : (storedNoteMode() || "read");
+    const modeBtn = (m, label, hint) => el("button", { type: "button", role: "radio", title: hint, onclick: () => setMode(m, true) }, label);
+    const modes = el("div", { class: "note-modes", role: "radiogroup", "aria-label": "笔记显示方式" },
+      modeBtn("edit", "编辑", "编辑 Markdown 原文（⌘E 切换）"), modeBtn("read", "阅读", "看排版后的效果（⌘E 切换）"));
+    const setMode = (m, remember) => {
+      mode = m;
+      modes.querySelectorAll("button").forEach((b, i) => b.setAttribute("aria-checked", String((i === 0) === (m === "edit"))));
+      body.hidden = m !== "edit";
+      preview.hidden = m !== "read";
+      cite.hidden = m !== "edit";
+      if (m === "read") {
+        renderPreview(preview, body.value);
+        if (!body.value.trim()) preview.replaceChildren(el("p", { class: "dim" }, "还是空的。点「编辑」开始写。"));
+      } else body.focus();
+      if (remember) { try { localStorage.setItem(NOTE_MODE_KEY, m); } catch { /* private window */ } }
+    };
+    const keys = (e) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key === "s") { e.preventDefault(); save(); }
+      if (e.key === "e") { e.preventDefault(); setMode(mode === "edit" ? "read" : "edit", true); }
+    };
+    body.addEventListener("keydown", keys);
+    title.addEventListener("keydown", keys);
+    preview.tabIndex = -1;
+    preview.addEventListener("keydown", keys);
     const pin = el("button", { type: "button", class: "btn sm", onclick: async () => {
       try { view.data = await api(`/api/notes/${n.id}`, { method: "PATCH", json: { pinned: !n.pinned } }); load(); renderNote(); } catch (e) { fail(e); }
     } }, n.pinned ? "取消置顶" : "置顶");
@@ -687,11 +711,15 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     main.replaceChildren(el("div", { class: "note" },
       archived && el("div", { class: "note-archived" }, "这篇笔记已归档，不在笔记列表里。",
         el("button", { type: "button", class: "btn sm", onclick: restore }, "恢复到笔记")),
-      el("div", { class: "note-bar" }, title, status, cite, !archived && pin, del,
+      el("div", { class: "note-bar" }, title, modes, status, cite, !archived && pin, del,
         el("button", { type: "button", class: "btn sm", onclick: () => askAgent("请在这篇笔记末尾补充一段，把相关文献和图中的节点联系起来。", false) }, "让 Agent 补充")),
-      el("div", { class: "note-split" }, body, preview)));
-    renderPreview(preview, n.body);
-    if (focus) body.focus();
+      el("div", { class: "note-pane" }, body, preview)));
+    setMode(mode, false);
+    if (mode === "read") preview.focus({ preventScroll: true });
+  }
+
+  function storedNoteMode() {
+    try { const m = localStorage.getItem(NOTE_MODE_KEY); return m === "edit" || m === "read" ? m : null; } catch { return null; }
   }
 
   function citePicker(textarea, changed) {
@@ -720,51 +748,23 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     input.focus();
   }
 
-  /* Paragraphs of plain text with chips for [@citekey], [[n_…]], [[ex_…]], [[it_…]], and formulas ($…$, $$…$$,
-     \(…\), \[…\]) drawn by KaTeX. Other Markdown is shown as typed. */
+  /* The note as Markdown (tables, lists, formulas…) with chips for [@citekey], [[n_…]], [[ex_…]] and [[it_…]]. */
   function renderPreview(box, text) {
     const byId = new Map(nodes().map((n) => [n.id, n]));
-    box.replaceChildren(...(text || "").split(/\n{2,}/).map((para) => {
-      const p = el("p");
-      let at = 0, block = false;
-      // A display formula is its own block, so the line breaks around it would show as blank lines (pre-wrap).
-      const text = (s, display) => refsInto(p, (block ? s.replace(/^\n/, "") : s).replace(display ? /\n$/ : /$^/, ""), byId);
-      for (const m of para.matchAll(MATH)) {
-        const display = m[1] != null || m[2] != null;
-        text(para.slice(at, m.index), display);
-        at = m.index + m[0].length;
-        block = display;
-        p.append(paperReading.math((m[1] ?? m[2] ?? m[3] ?? m[4]).trim(), display));
-      }
-      text(para.slice(at), false);
-      return p;
+    const chip = (key, loc) => el("button", { type: "button", class: "ref cite", title: loc || null, onclick: () => openCitekey(key) },
+      `@${key}`, loc ? el("small", {}, ` ${loc}`) : null);
+    box.replaceChildren(...renderMarkdown(text, {
+      breaks: true,
+      cite: (keys, locs) => (keys.length === 1 ? chip(keys[0], locs[keys[0]]) : el("span", {}, ...keys.map((k) => chip(k, locs[k])))),
+      ref: (id) => {
+        if (id.startsWith("n_")) {
+          const n = byId.get(id);
+          return el("button", { type: "button", class: "ref node", style: n ? `--c:${typeOf(n.type).color}` : "", onclick: () => openNode(id) }, n ? n.name : "已删除的节点");
+        }
+        if (id.startsWith("ex_")) return el("button", { type: "button", class: "ref ex", onclick: () => openExcerpt(id) }, "摘录");
+        return el("button", { type: "button", class: "ref cite", onclick: () => openItem(id) }, "文献");
+      },
     }));
-  }
-
-  /** Text with its [@citekey], [[n_…]], [[ex_…]] and [[it_…]] turned into chips, appended to `p`. */
-  function refsInto(p, para, byId) {
-    let last = 0;
-    for (const m of para.matchAll(REF)) {
-      let before = para.slice(last, m.index);
-      last = m.index + m[0].length;
-      if (m[2]) {
-        const key = m[2].replace(/[.,;:]+$/, "");
-        const tail = m[2].slice(key.length);
-        if (before.endsWith("[") && !tail && para[last] === "]") { before = before.slice(0, -1); last += 1; } // [@key] -> chip
-        p.append(before, el("button", { type: "button", class: "ref cite", onclick: () => openCitekey(key) }, `@${key}`), tail);
-        continue;
-      }
-      p.append(before);
-      if (m[1].startsWith("n_")) {
-        const n = byId.get(m[1]);
-        p.append(el("button", { type: "button", class: "ref node", style: n ? `--c:${typeOf(n.type).color}` : "", onclick: () => openNode(m[1]) }, n ? n.name : "已删除的节点"));
-      } else if (m[1].startsWith("ex_")) {
-        p.append(el("button", { type: "button", class: "ref ex", onclick: () => openExcerpt(m[1]) }, "摘录"));
-      } else {
-        p.append(el("button", { type: "button", class: "ref cite", onclick: () => openItem(m[1]) }, "文献"));
-      }
-    }
-    p.append(para.slice(last));
   }
 
   async function openCitekey(key) {
@@ -817,5 +817,6 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     hide() { visible = false; root.hidden = true; selBar.hidden = true; setContext(null); },
     onMessage,
     openItem: (id, tab) => { side = "items"; return openItem(id, tab); },
+    openCitekey: (key) => { side = "items"; return openCitekey(key); },
   };
 }
