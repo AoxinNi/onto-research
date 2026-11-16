@@ -101,7 +101,7 @@ def link(store, type, a, b, **kw):
 
 @pytest.fixture(autouse=True)
 def no_network(monkeypatch):
-    """Live sources (FRED, 同花顺, feeds) must never be reached from tests; fakes are injected where needed."""
+    """Live sources (Binance, FRED, feeds) must never be reached from tests; fakes are injected where needed."""
     from ontology import sources
 
     monkeypatch.setattr(series, "TEMPLATES", Path(__file__).parent / "fixtures" / "bindings.yaml")

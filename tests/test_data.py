@@ -92,21 +92,22 @@ def test_binding_validation(store, fake):
 
 
 def test_templates_bind_settled_nodes_and_respect_removal(store, human):
-    dxy = node(store, "MacroIndicator", "美元指数", aliases=["DXY"])
+    btc = node(store, "Asset", "比特币", props=BTC)
     rate = node(store, "MacroIndicator", "联邦基金目标利率", aliases=["Federal Funds Target Rate"])
-    node(store, "Metric", "资金费率", aliases=["Funding Rate"])  # no template for it
+    node(store, "Metric", "资金费率", aliases=["Funding Rate"])
     assert store.apply_templates() == []  # still pending review
     human.accept_changeset(store.submit_changeset("nodes")["id"])
 
     made = {b["series_key"] for b in store.apply_templates()}
-    assert made == {"fred:series=DFEDTARU", "fred:series=DTWEXBGS"}
+    assert made == {"binance_klines:interval=1h,symbol=BTCUSDT", "binance_klines:interval=1d,symbol=BTCUSDT", "fred:series=DFEDTARU",
+                    "binance_funding:symbol=BTCUSDT"}
     assert store.apply_templates() == []
     rate_binding = store.list_bindings(rate["id"])[0]
     assert rate_binding["unit"] == "%" and rate_binding["provenance"]["ref"] == "template:fed-funds-target"
 
     human.archive(rate_binding["binding_id"], "不需要")
     assert store.apply_templates() == []
-    assert not store.list_bindings(rate["id"]) and store.list_bindings(dxy["id"])
+    assert not store.list_bindings(rate["id"]) and store.list_bindings(btc["id"])
 
 
 def test_archiving_or_merging_a_node_carries_its_bindings(store, human, fake):
@@ -127,10 +128,10 @@ def test_archiving_or_merging_a_node_carries_its_bindings(store, human, fake):
 
 
 def test_reverting_a_node_takes_its_template_binding(store, human):
-    node(store, "MacroIndicator", "美元指数", aliases=["DXY"])
+    node(store, "Asset", "比特币", props=BTC)
     cs = store.submit_changeset("node")
     human.accept_changeset(cs["id"])
-    assert len(store.apply_templates()) == 1
+    assert len(store.apply_templates()) == 2
     human.revert_changeset(cs["id"])
     assert store.conn.execute("SELECT count(*) AS n FROM bindings").fetchone()["n"] == 0
 
@@ -155,8 +156,8 @@ def test_manual_csv_import(store, human, tmp_path):
 def test_a_source_removed_from_the_catalog_keeps_its_points_but_is_not_fetched(store, human, fake):
     from ontology import collector
 
-    btc = node(store, "Asset", "比特币", props=BTC)
-    store.propose_binding(btc["id"], "fake", {"symbol": "BTC"}, "price", "价格")
+    btc = node(store, "Metric", "测试指标")  # no binding template matches it
+    store.propose_binding(btc["id"], "fake", {"symbol": "BTC"}, "level", "数值")
     human.accept_changeset(store.submit_changeset("node + binding")["id"])
     collector.run_once(store.conn)
     assert len(store.series.collectable()) == 1
@@ -169,8 +170,20 @@ def test_a_source_removed_from_the_catalog_keeps_its_points_but_is_not_fetched(s
 
 
 def test_parsers_on_recorded_payloads():
+    k = sources.parse_klines([[1792382400000, "82530.8", "82882.0", "82484.2", "82783.5", "407.5", 0, "0", 0, "0", "0", "0"]])
+    assert k[0].value == 82783.5 and k[0].payload["h"] == 82882.0 and k[0].ts.hour == (1792382400 // 3600) % 24
+    f = sources.parse_funding([{"symbol": "BTCUSDT", "fundingTime": 1792339200000, "fundingRate": "0.00005841",
+                                "markPrice": "81139.03"}])
+    assert round(f[0].value, 6) == 0.005841
+    oi = sources.parse_open_interest([{"sumOpenInterest": "94556.5", "sumOpenInterestValue": "7800930186.9",
+                                       "timestamp": 1792382400000}])
+    assert oi[0].value == 7800930186.9
     fred = sources.parse_fred_csv("observation_date,DFF\n2026-10-15,4.33\n2026-10-16,.\n")
     assert len(fred) == 1 and fred[0].value == 4.33
+    hr = sources.parse_hashrate({"hashrates": [{"timestamp": 1789862400, "avgHashrate": 8.26e20}]})
+    assert hr[0].value == 826.0
+    st = sources.parse_stablecoin([{"date": "1789862400", "totalCirculatingUSD": {"peggedUSD": 1.8e11}}, {"date": "1"}])
+    assert len(st) == 1 and st[0].value == 1.8e11
 
 
 def test_fred_html_page_is_a_source_error_not_a_crash():

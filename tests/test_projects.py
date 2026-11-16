@@ -251,9 +251,7 @@ def test_sources_page_lists_providers_with_status(client, monkeypatch):
     by_id = {p["id"]: p for p in data["providers"]}
     assert by_id["ths"]["configured"] is False and by_id["ths"]["auth_env"] == "THS_API_KEY"
     assert {s["source"] for s in by_id["ths"]["sources"]} == {"ths_stock_daily", "ths_index_daily", "ths_valuation", "ths_fin_indicator"}
-    assert by_id["fred"]["configured"] is True and by_id["fred"]["health"]["series"] == 0
-    assert not {"binance", "mempool", "defillama", "ethereum", "trongrid"} & set(by_id)
-    assert not {"crypto", "onchain"} & set(data["categories"])
+    assert by_id["binance"]["configured"] is True and by_id["binance"]["health"]["series"] == 0
     r = client.post("/api/sources/ths/test").json()
     assert r["ok"] is False and "THS_API_KEY" in r["message"]
     assert client.get("/sources").status_code == 200
@@ -316,7 +314,7 @@ def test_source_key_is_saved_to_env_file_and_masked(client, monkeypatch, tmp_pat
     assert (env.stat().st_mode & 0o777) == 0o600
 
     assert client.put("/api/sources/ths/key", json={"key": "has space"}).status_code == 400
-    assert client.put("/api/sources/fred/key", json={"key": "x"}).status_code == 400
+    assert client.put("/api/sources/binance/key", json={"key": "x"}).status_code == 400
     assert not client.put("/api/sources/ths/key", json={"key": ""}).json()["configured"]
     assert "THS_API_KEY" not in env.read_text(encoding="utf-8")
 

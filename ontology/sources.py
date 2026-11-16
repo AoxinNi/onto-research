@@ -34,6 +34,10 @@ def _utc_ms(ms: int | str) -> datetime:
     return datetime.fromtimestamp(int(ms) / 1000, tz=UTC)
 
 
+def _utc_s(s: int | str) -> datetime:
+    return datetime.fromtimestamp(int(s), tz=UTC)
+
+
 @dataclass
 class Source:
     name: str
@@ -96,6 +100,114 @@ def _get(url: str, *, retry: bool = True, provider: str | None = None, headers: 
     raise AssertionError("unreachable")
 
 
+# ---------------------------------------------------------------------- Binance
+
+
+BINANCE_SPOT = ["https://api.binance.com", "https://api1.binance.com", "https://api2.binance.com",
+                "https://api3.binance.com", "https://data-api.binance.vision"]
+BINANCE_FUTURES = "https://fapi.binance.com"
+_binance_ok: str | None = None  # the mirror that answered last; tried first next time
+
+
+def parse_klines(rows: list[list[Any]]) -> list[Obs]:
+    return [Obs(_utc_ms(r[0]), float(r[4]), {"o": float(r[1]), "h": float(r[2]), "l": float(r[3]), "v": float(r[5])})
+            for r in rows]
+
+
+class BinanceKlines(Source):
+    def label(self, p):
+        return f"Binance {p['symbol']} {p['interval']} 收盘价"
+
+    def frequency(self, p):
+        return p["interval"]
+
+    def backfill_for(self, p):
+        return timedelta(days=1500) if p["interval"] == "1d" else self.backfill
+
+    def fetch(self, p, since):
+        out: list[Obs] = []
+        start = int(since.timestamp() * 1000)
+        for _ in range(20):  # 20 pages x 1000 bars is plenty for any backfill we do
+            rows = None
+            # Some regions get HTTP 451 from api*.binance.com; start with whichever mirror worked last time.
+            global _binance_ok
+            order = sorted(BINANCE_SPOT, key=lambda b: b != _binance_ok)
+            for base in order:  # one quick try per mirror; the last one gets the full retries
+                try:
+                    rows = _get(f"{base}/api/v3/klines", retry=base == order[-1], provider=self.provider, symbol=p["symbol"],
+                                interval=p["interval"], startTime=start, limit=1000).json()
+                    _binance_ok = base
+                    break
+                except OntologyError:
+                    if base == order[-1]:
+                        raise
+            page = parse_klines(rows or [])
+            out += page
+            if len(page) < 1000:
+                break
+            start = int(page[-1].ts.timestamp() * 1000) + 1
+        # The bar still forming is kept as a provisional point (payload.open) so the node shows the live price;
+        # the next fetch re-reads it (the collector overlaps the last few bars) until it closes.
+        now = datetime.now(UTC)
+        step = timedelta(seconds=FREQ_SECONDS.get(p["interval"], 3600))
+        for o in out:
+            if o.ts + step > now:
+                o.payload = {**(o.payload or {}), "open": True}
+        return out
+
+
+def parse_funding(rows: list[dict[str, Any]]) -> list[Obs]:
+    return [Obs(_utc_ms(r["fundingTime"]), float(r["fundingRate"]) * 100, {"mark": float(r.get("markPrice") or 0)})
+            for r in rows]
+
+
+class BinanceFunding(Source):
+    def label(self, p):
+        return f"Binance {p['symbol']} 永续资金费率"
+
+    def frequency(self, p):
+        return "8h"
+
+    def fetch(self, p, since):
+        out: list[Obs] = []
+        start = int(since.timestamp() * 1000)
+        for _ in range(10):
+            page = parse_funding(_get(f"{BINANCE_FUTURES}/fapi/v1/fundingRate", provider=self.provider, symbol=p["symbol"],
+                                      startTime=start, limit=1000).json())
+            out += page
+            if len(page) < 1000:
+                break
+            start = int(page[-1].ts.timestamp() * 1000) + 1
+        return out
+
+
+def parse_open_interest(rows: list[dict[str, Any]]) -> list[Obs]:
+    return [Obs(_utc_ms(r["timestamp"]), float(r["sumOpenInterestValue"]), {"btc": float(r["sumOpenInterest"])})
+            for r in rows]
+
+
+class BinanceOpenInterest(Source):
+    def label(self, p):
+        return f"Binance {p['symbol']} 未平仓量（美元）"
+
+    def frequency(self, p):
+        return p["period"]
+
+    def fetch(self, p, since):
+        # Binance keeps only the last 30 days of this history.
+        since = max(since, datetime.now(UTC) - timedelta(days=29))
+        out: list[Obs] = []
+        start = int(since.timestamp() * 1000)
+        for _ in range(5):
+            page = parse_open_interest(_get(f"{BINANCE_FUTURES}/futures/data/openInterestHist", provider=self.provider, symbol=p["symbol"],
+                                            period=p["period"], startTime=start, limit=500).json())
+            out += page
+            if len(page) < 500:
+                break
+            start = int(page[-1].ts.timestamp() * 1000) + 1
+        return out
+
+
 # ------------------------------------------------------------------------- FRED
 
 
@@ -133,7 +245,38 @@ class Fred(Source):
         return [o for o in parse_fred_csv(text) if o.ts >= since]
 
 
-# ----------------------------------------------------------------------- in-house
+# ---------------------------------------------------------------- on-chain, flows
+
+
+def parse_hashrate(data: dict[str, Any]) -> list[Obs]:
+    return [Obs(_utc_s(h["timestamp"]), h["avgHashrate"] / 1e18) for h in data.get("hashrates", [])]
+
+
+class MempoolHashrate(Source):
+    def fetch(self, p, since):
+        days = (datetime.now(UTC) - since).days
+        window = "1m" if days <= 31 else "3m" if days <= 92 else "1y" if days <= 366 else "3y"
+        data = _get(f"https://mempool.space/api/v1/mining/hashrate/{window}", provider=self.provider).json()
+        return [o for o in parse_hashrate(data) if o.ts >= since]
+
+
+def parse_stablecoin(rows: list[dict[str, Any]]) -> list[Obs]:
+    out = []
+    for r in rows:
+        v = (r.get("totalCirculatingUSD") or {}).get("peggedUSD")
+        if v is not None:
+            out.append(Obs(_utc_s(r["date"]), float(v)))
+    return out
+
+
+class DefiLlamaStablecoin(Source):
+    def label(self, p):
+        names = {"1": "USDT", "2": "USDC"}
+        return f"DefiLlama {names.get(p['id'], '稳定币 #' + p['id'])} 流通量"
+
+    def fetch(self, p, since):
+        rows = _get("https://stablecoins.llama.fi/stablecoincharts/all", provider=self.provider, stablecoin=p["id"]).json()
+        return [o for o in parse_stablecoin(rows) if o.ts >= since]
 
 
 class Manual(Source):
@@ -163,8 +306,18 @@ class NewsSignal(Source):
 
 
 SOURCES: dict[str, Source] = {s.name: s for s in [
+    BinanceKlines("binance_klines", "Binance 现货 K 线", {"symbol": "交易对，如 BTCUSDT", "interval": "1h / 4h / 1d"},
+                  "USDT", timedelta(minutes=5), timedelta(days=90), {"interval": "1h"}, provider="binance"),
+    BinanceFunding("binance_funding", "Binance 永续资金费率", {"symbol": "合约，如 BTCUSDT"},
+                   "%", timedelta(minutes=30), timedelta(days=180), provider="binance"),
+    BinanceOpenInterest("binance_oi", "Binance 未平仓量", {"symbol": "合约，如 BTCUSDT", "period": "1h / 4h / 1d"},
+                        "USD", timedelta(minutes=15), timedelta(days=29), {"period": "1h"}, provider="binance"),
     Fred("fred", "FRED 经济数据", {"series": "FRED 代码，如 DFF、DGS10、M2SL、CPIAUCSL、DTWEXBGS"},
          None, timedelta(hours=6), timedelta(days=3650), lag=timedelta(days=14), provider="fred"),
+    MempoolHashrate("mempool_hashrate", "mempool.space 全网算力（日均）", {}, "EH/s", timedelta(hours=6),
+                    timedelta(days=365), provider="mempool"),
+    DefiLlamaStablecoin("defillama_stablecoin", "DefiLlama 稳定币流通量", {"id": "稳定币 id：1=USDT，2=USDC"},
+                        "USD", timedelta(hours=6), timedelta(days=730), provider="defillama"),
     Manual("manual", "手动导入（CSV）", {"name": "序列名称", "frequency": "1h / 1d / 1mo"}, None,
            timedelta(days=36500), timedelta(0), {"frequency": "1d"}, polled=False, provider="manual"),
     NewsSignal("news_heat", "新闻热度", {"node": "节点 id", "name": "节点名称"}, None, timedelta(days=36500),
@@ -176,9 +329,9 @@ SOURCES: dict[str, Source] = {s.name: s for s in [
 
 def _register_providers() -> None:
     """Sources that live in their own provider modules (they import this one, so this runs last)."""
-    from . import ths
+    from . import onchain, ths
 
-    for src in ths.SOURCES:
+    for src in ths.SOURCES + onchain.SOURCES:
         SOURCES[src.name] = src
 
 

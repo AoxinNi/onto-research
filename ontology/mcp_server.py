@@ -346,7 +346,7 @@ def propose_binding(
     node_id: str, source: str, params: dict[str, Any], role: str, rationale: str,
     provenance: Provenance | None = None,
 ) -> dict[str, Any]:
-    """Bind a node to a data series, e.g. 美国十年期国债收益率 -> fred {series: DGS10} as role level. One series per
+    """Bind a node to a data series, e.g. 比特币 -> binance_klines {symbol: BTCUSDT} as role price. One series per
     node and role; proposing again replaces it. Reviewed like other writes; collection starts once accepted."""
     return store().propose_binding(node_id, source, params, role, rationale,
                                    provenance.model_dump(exclude_none=True) if provenance else None)

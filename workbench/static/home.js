@@ -368,7 +368,7 @@ const ZH = {
   submit_changeset: "把本轮改动提交给人审核。",
   list_changesets: "查看最近的变更集和状态。",
   revert_changeset: "整批撤销一个变更集（默认最近一个）。",
-  list_sources: "可绑定的数据源及参数（FRED、同花顺、手动导入…）。",
+  list_sources: "可绑定的数据源及参数（Binance、FRED、mempool、DefiLlama…）。",
   list_bindings: "节点绑定了哪些数据序列，以及最新值、涨跌和健康状态。",
   get_latest: "读取节点数据的最新值、变化和新鲜度。",
   get_series: "读取节点数据的时间序列。",
@@ -616,7 +616,7 @@ mcpForm.addEventListener("submit", async (e) => {
 
 // ------------------------------------------------------------------ data sources
 
-const CATEGORY_ORDER = ["a-share", "macro", "news", "social", "internal"];
+const CATEGORY_ORDER = ["a-share", "crypto", "onchain", "macro", "news", "social", "internal"];
 
 async function loadSources() {
   try {
