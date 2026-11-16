@@ -69,15 +69,28 @@ Agent 不直接改论文。它通过 `suggest_edit`、`suggest_section`、`sugge
 
 ## 本地开发
 
-用 Python 3.11 或更新版本安装依赖。将 `.env.example` 复制为 `.env`，设置 PostgreSQL 的 `DATABASE_URL`。
+用 Python 3.11 或更新版本安装依赖：
 
 ```sh
 python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e '.[local,dev]'
 ./start-workbench.sh
 ```
 
-访问 <http://127.0.0.1:8766>。本地入口按本机单用户模式运行。用 `.venv/bin/python -m ontology.cli projects` 验证数据库连接和项目列表。对单一项目执行命令时传入 `--project <id>`。
+`./start-workbench.sh` 启动本机工作台并打开 <http://127.0.0.1:8766>。它和桌面应用是同一个工作台：同一个地址、同一份数据，所以在浏览器里和在桌面应用里看到的是同样的项目。桌面应用启动时如果 8766 上已有工作台就直接用它，否则自己启动内置的那一个；反过来，桌面应用开着时运行这个脚本只会打开浏览器。
+
+数据都在应用数据目录（macOS 为 `~/Library/Application Support/onto-research`，可用 `ONTO_DATA_DIR` 改位置）：
+
+| 位置 | 内容 |
+| --- | --- |
+| `pg/` | 内置的 PostgreSQL 16（`onto-research[local]` 里的 pgserver），不需要 Docker |
+| `.env` | 数据源密钥（在「数据源」页填写的同花顺等） |
+| `projects/<id>/` | 项目快照：纯文本文件，可选 git 提交 |
+| `papers/` | MinerU 转换结果的缓存 |
+
+MCP 服务、模型和 MinerU 的设置在 `~/.config/onto-research/`。要改用别的数据库，在环境里设置 `DATABASE_URL`（或用 `ENV_FILE=.env ./start-workbench.sh` 读取本仓库 `.env` 里的配置）。
+
+本地入口按本机单用户模式运行。用 `.venv/bin/python -m ontology.cli projects` 验证数据库连接和项目列表。对单一项目执行命令时传入 `--project <id>`。测试使用单独的 `onto_research_test` 库（见 `tests/conftest.py`）。
 
 ## CloudBase 云托管预发布
 

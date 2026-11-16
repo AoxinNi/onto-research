@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -21,7 +22,17 @@ from typing import Any, Callable
 
 from .errors import OntologyError
 
-ENV_FILE = Path(os.environ.get("ENV_FILE") or Path(__file__).resolve().parent.parent / ".env")
+def _default_env_file() -> Path:
+    """The project's .env in a source checkout. The desktop app's bundled server has no checkout (its files are
+    unpacked into a temporary folder), so its keys live in the app's data folder, next to the database."""
+    if getattr(sys, "frozen", False):
+        from .localdb import data_dir
+
+        return data_dir() / ".env"
+    return Path(__file__).resolve().parent.parent / ".env"
+
+
+ENV_FILE = Path(os.environ.get("ENV_FILE") or _default_env_file())
 
 CATEGORIES = {"crypto": "加密市场", "onchain": "链上数据", "macro": "宏观经济", "a-share": "A 股", "news": "新闻资讯", "social": "社交媒体",
               "parsing": "文档解析", "internal": "内部计算"}
@@ -125,6 +136,7 @@ def save_key(provider_id: str, value: str, env_file: Path | None = None) -> Prov
     kept = [ln for ln in lines if not pattern.match(ln)]
     if value:
         kept.append(f"{p.auth_env}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(kept) + "\n", encoding="utf-8")
     path.chmod(0o600)
     if value:

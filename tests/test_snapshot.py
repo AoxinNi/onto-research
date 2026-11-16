@@ -113,3 +113,29 @@ def test_the_data_folder_follows_the_platform(monkeypatch, tmp_path):
     assert str(localdb.data_dir()).endswith("Library/Application Support/onto-research")
     monkeypatch.setenv("ONTO_LOCAL_DB", "0")
     assert not localdb.wanted()
+
+
+def test_the_embedded_database_starts_in_a_folder_with_a_space(monkeypatch, tmp_path):
+    """macOS keeps app data under "Application Support"; pgserver passes the socket folder unquoted."""
+    pytest.importorskip("pgserver")
+    import psycopg
+
+    monkeypatch.setenv("ONTO_DATA_DIR", str(tmp_path / "Application Support" / "onto-research"))
+    monkeypatch.setattr(localdb, "_server", None)
+    monkeypatch.setattr(localdb, "_url", None)
+    try:
+        url = localdb.url()
+        assert " " not in psycopg.conninfo.conninfo_to_dict(url)["host"]
+        with psycopg.connect(url) as c:
+            assert c.execute("SELECT current_database()").fetchone()[0] == localdb.DATABASE
+    finally:
+        localdb.stop()
+
+
+def test_the_bundled_server_keeps_its_keys_in_the_data_folder(monkeypatch, tmp_path):
+    from ontology import providers
+
+    monkeypatch.setenv("ONTO_DATA_DIR", str(tmp_path))
+    assert providers._default_env_file().name == ".env" and providers._default_env_file().parent != tmp_path
+    monkeypatch.setattr(providers.sys, "frozen", True, raising=False)
+    assert providers._default_env_file() == tmp_path / ".env"

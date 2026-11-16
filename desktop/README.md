@@ -54,7 +54,7 @@ npm ci
 npm run dev            # 组装 dist/ 并打开原生窗口
 ```
 
-默认连接 `http://127.0.0.1:8766`。先在仓库根目录启动本机工作台（`./start-workbench.sh`）；没有设置 `DATABASE_URL` 且装了 `onto-research[local]` 时，它会用内置的 PostgreSQL（数据在 `~/Library/Application Support/onto-research`），不需要 Docker。本机模式不需要登录，应用启动后直接进入项目总览。要连接云端，在登录页底部「服务器」中填写 HTTPS 地址，或在构建时设置 `ONTO_DEFAULT_SERVER`。
+默认连接 `http://127.0.0.1:8766`，和仓库根目录的 `./start-workbench.sh` 是同一个地址、同一份数据（`~/Library/Application Support/onto-research`：内置 PostgreSQL、数据源密钥、项目快照），所以桌面应用和浏览器里看到的是同样的项目。8766 上已有工作台时应用直接用它；没有时启动应用自带的那一个（见下方「本机内置工作台」），不需要 Docker。本机模式不需要登录，应用启动后直接进入项目总览。要连接云端，在登录页底部「服务器」中填写 HTTPS 地址，或在构建时设置 `ONTO_DEFAULT_SERVER`。
 
 修改 `workbench/static` 下的页面后，重新运行 `npm run dev` 即可（`npm run assemble` 会把页面复制到 `dist/`）。网页版和桌面端共用同一份代码。新增的网络调用请使用 `net.js`，不要直接调用 `fetch` 或 `WebSocket`。新增的 Rust 命令要同时登记在 `build.rs` 和 `capabilities/main.json` 中。
 

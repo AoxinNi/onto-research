@@ -18,6 +18,7 @@ an MCP server started by a client can share one database.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sys
@@ -78,6 +79,7 @@ def url() -> str:
             raise RuntimeError("没有内置数据库：请安装 onto-research[local]（pgserver），或设置 DATABASE_URL。") from e
         pgdata = data_dir() / "pg"
         pgdata.mkdir(parents=True, exist_ok=True)
+        _socket_dir_without_spaces()
         _server = pgserver.get_server(pgdata, cleanup_mode="stop")
         _prune_handles()
         info = _server.get_postmaster_info()
@@ -91,6 +93,32 @@ def url() -> str:
         _url = make_conninfo("", user="postgres", dbname=DATABASE, **where)
         log.info("embedded Postgres in %s", pgdata)
         return _url
+
+
+def _socket_dir_without_spaces() -> None:
+    """pgserver hands Postgres the socket folder inside one option string (`-o "-k <folder>"`), unquoted, so a folder
+    with a space in its path, such as macOS's "Application Support", splits in two and Postgres refuses to start.
+    For such a folder, put the socket where pgserver puts it when the data folder's path is too long: its runtime
+    folder, under a name derived from the data folder."""
+    from pgserver import postgres_server, utils
+
+    original = utils.find_suitable_socket_dir
+    if getattr(postgres_server.find_suitable_socket_dir, "_onto", False):
+        return
+
+    def find(pgdata: Path, runtime_path: Path) -> Path:
+        path = original(pgdata, runtime_path)
+        if not any(c.isspace() for c in str(path)):
+            return path
+        name = hashlib.sha256(f"{pgdata}-{pgdata.stat().st_ino}".encode()).hexdigest()[:10]
+        alt = Path(runtime_path) / name
+        if any(c.isspace() for c in str(alt)):
+            raise RuntimeError(f"内置数据库的套接字目录不能含空格：{alt}；请用 ONTO_DATA_DIR 换一个不含空格的数据目录")
+        alt.mkdir(parents=True, exist_ok=True)
+        return alt
+
+    find._onto = True  # type: ignore[attr-defined]
+    postgres_server.find_suitable_socket_dir = find
 
 
 def _alive(pid: int) -> bool:
