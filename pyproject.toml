@@ -18,6 +18,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
+# The embedded Postgres for local and desktop runs (ontology/localdb.py): no DATABASE_URL, no Docker.
+local = ["pgserver>=0.1.4"]
 
 [build-system]
 requires = ["setuptools>=69"]

@@ -12,10 +12,18 @@ MIGRATIONS = Path(__file__).parent / "migrations"
 
 
 def database_url() -> str:
+    """DATABASE_URL, or else the embedded Postgres (ontology/localdb.py) when it is installed and not turned off.
+    The embedded server's address is put into DATABASE_URL, so child processes use the same database."""
     url = os.environ.get("DATABASE_URL", "").strip()
-    if not url:
-        raise RuntimeError("DATABASE_URL 未配置。请在服务环境中填写 PostgreSQL 连接串。")
-    return url
+    if url:
+        return url
+    from . import localdb
+
+    if localdb.wanted():
+        url = localdb.url()
+        os.environ["DATABASE_URL"] = url
+        return url
+    raise RuntimeError("DATABASE_URL 未配置。请在服务环境中填写 PostgreSQL 连接串，或安装 onto-research[local] 使用内置数据库。")
 
 
 def connect(url: str | None = None) -> psycopg.Connection:

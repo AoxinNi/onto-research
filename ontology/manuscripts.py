@@ -12,6 +12,8 @@ still be accepted after the person has seen the difference against the current t
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
@@ -458,7 +460,13 @@ class Manuscripts:
         error: a citekey not in the library (or archived); a claim anchor on a node that does not exist, is archived
         or not yet accepted. warning: an anchored claim with no grounding, or only contradicting ones; a grounding
         on an anchored claim whose excerpt was not found in the source. info: the sentence cites a source that does
-        not ground the claim it anchors; a source grounds the claim but the sentence does not cite it."""
+        not ground the claim it anchors; a source grounds the claim but the sentence does not cite it.
+
+        Against the sources' text (`_check_sources`): warning, a quoted passage that is not in the cited source or
+        is on another page than the citation says, and a number in a citing sentence that none of the cited sources
+        contains; info, a quote or number that could not be checked because the source has no extracted text.
+
+        Each issue has `start` and `end`, offsets in the section body (None when there is no single place)."""
         ms = self.get(manuscript_id)
         issues: list[dict[str, Any]] = []
         items = {r["citekey"]: r for r in self.conn.execute(
@@ -479,17 +487,23 @@ class Manuscripts:
 
         def add(level: str, code: str, section: dict[str, Any], message: str, **extra: Any) -> None:
             issues.append({"level": level, "code": code, "section_id": section["id"], "heading": section["heading"],
-                           "message": message, **extra})
+                           "message": message, "start": None, "end": None, **extra})
 
         for s in ms["sections"]:
+            vis = cite.visible(s["body"])
             for key in s["citekeys"]:
                 it = items.get(key)
+                m = re.search(rf"(?<![\w.@])-?@{re.escape(key)}(?![\w一-鿿:#$%&+?<>~/-])", vis)
+                at = {"start": m.start(), "end": m.end()} if m else {}
                 if not it:
-                    add("error", "unknown_citekey", s, f"文献库里没有 @{key}", citekey=key)
+                    add("error", "unknown_citekey", s, f"文献库里没有 @{key}", citekey=key, **at)
                 elif it["status"] != "active":
-                    add("error", "archived_source", s, f"@{key} 对应的文献已归档", citekey=key, item_id=it["id"])
+                    add("error", "archived_source", s, f"@{key} 对应的文献已归档", citekey=key, item_id=it["id"], **at)
+        self._check_sources(ms["sections"], items, add)
         seen_unverified: set[tuple[str, str]] = set()
+        spans: list[tuple[int, cite.Claim]] = []  # (first issue of the claim, claim), to give its issues an offset
         for s, c in claims:
+            spans.append((len(issues), c))
             n = nodes.get(c.node)
             quote = c.text.strip()[:60]
             if not n:
@@ -522,6 +536,12 @@ class Manuscripts:
                 add("info", "grounding_not_cited", s,
                     f"写到「{n['name']}」时没有引用它的依据：{'、'.join('@' + k for k in missing)}",
                     node_id=c.node, citekeys=missing)
+        for k, (first, c) in enumerate(spans):
+            for i in issues[first:spans[k + 1][0] if k + 1 < len(spans) else len(issues)]:
+                i["start"], i["end"] = c.start, c.end
+        bodies = {s["id"]: s["body"] for s in ms["sections"]}
+        for i in issues:  # the marked text, so an editor with unsaved changes can still find the place
+            i["snippet"] = bodies[i["section_id"]][i["start"]:i["end"]] if i["start"] is not None else None
         order = {"error": 0, "warning": 1, "info": 2}
         issues.sort(key=lambda i: order[i["level"]])
         counts = {lvl: sum(1 for i in issues if i["level"] == lvl) for lvl in order}
@@ -529,6 +549,90 @@ class Manuscripts:
                 "claims": [{"section_id": s["id"], "node_id": c.node, "text": c.text, "citekeys": c.citekeys,
                             "groundings": [{"citekey": g["citekey"], "stance": g["stance"], "item_id": g["item_id"]}
                                            for g in grounds.get(c.node, [])]} for s, c in claims]}
+
+    def _check_sources(self, sections: list[dict[str, Any]], items: dict[str, dict[str, Any]], add: Any) -> None:
+        """Quotes and numbers that sit next to a citation, checked against the cited sources' extracted text.
+
+        A quote passes when one of its cited sources contains it (spacing, widths, quote marks and case ignored); it
+        is on the wrong page when the citation names one source and a page, and the text has the quote only on other
+        pages. A number passes when one of the sentence's cited sources has the same value anywhere, also as a
+        fraction of a percentage (23.5% and 0.235) or rounded to the draft's precision (23% for 23.4%). Sources with
+        no text are reported once per section as not checked, never as wrong."""
+        from .library import MIN_QUOTE, Library, fold
+
+        found = [(s, cite.quotes(s["body"]), cite.numbers(s["body"])) for s in sections]
+        keys = {k for _, qs, ns in found for c in (*qs, *ns) for k in c.citekeys}
+        ids = {k: items[k]["id"] for k in keys if k in items and items[k]["status"] == "active"}
+        if not ids:
+            return
+        pages: dict[str, dict[int | None, list[str]]] = {}
+        for r in self.conn.execute(
+                "SELECT item_id, page, text FROM library_chunks WHERE item_id = ANY(%s) ORDER BY file_id, seq",
+                (list(ids.values()),)):
+            pages.setdefault(r["item_id"], {}).setdefault(r["page"], []).append(r["text"])
+        values: dict[str, list[tuple[float, int]]] = {}
+
+        def source_values(item_id: str) -> list[tuple[float, int]]:
+            if item_id not in values:
+                text = unicodedata.normalize("NFKC", "\n".join(t for ts in pages[item_id].values() for t in ts))
+                out = []
+                for m in cite.NUMBER.finditer(text):
+                    v = cite.number_value(m.group(0))
+                    if v is not None:
+                        out.append((v, len(m.group(0).split(".")[1].rstrip("% ")) if "." in m.group(0) else 0))
+                values[item_id] = out
+            return values[item_id]
+
+        def has_number(item_id: str, token: str) -> bool:
+            v = cite.number_value(token)
+            if v is None:
+                return True
+            decimals = len(token.split(".")[1].rstrip("% ")) if "." in token else 0
+            wanted = [v, v / 100] if token.endswith("%") else [v, v * 100]
+            for sv, sd in source_values(item_id):
+                for w in wanted:
+                    if abs(sv - w) < 1e-9 or (w == v and sd > decimals and abs(round(sv, decimals) - v) < 1e-9):
+                        return True
+            return False
+
+        lib = Library(self.conn)
+        for s, qs, ns in found:
+            unchecked: set[str] = set()
+            for q in qs:
+                cited = [(k, ids[k]) for k in q.citekeys if k in ids]
+                if not cited:
+                    continue
+                with_text = [(k, i) for k, i in cited if i in pages]
+                unchecked |= {k for k, i in cited if i not in pages}
+                if not with_text or len(fold(q.text)[0]) < MIN_QUOTE:
+                    continue
+                hits = [(k, lib.locate(i, q.text)) for k, i in with_text]
+                hits = [(k, h) for k, h in hits if h]
+                short = q.text if len(q.text) <= 40 else q.text[:40] + "…"
+                if not hits:
+                    names = "、".join("@" + k for k, _ in with_text)
+                    add("warning", "quote_mismatch", s, f"引文「{short}」不在 {names} 的原文里",
+                        citekey=with_text[0][0], start=q.start, end=q.end)
+                elif q.page is not None:
+                    k, i = with_text[0]
+                    on_page = lib.locate(i, q.text, q.page)
+                    if on_page and on_page["page"] is not None and on_page["page"] != q.page:
+                        add("warning", "quote_page", s,
+                            f"引文「{short}」在 @{k} 的第 {on_page['page']} 页，不是第 {q.page} 页",
+                            citekey=k, item_id=i, page=on_page["page"], start=q.start, end=q.end)
+            for n in ns:
+                cited = [(k, ids[k]) for k in n.citekeys if k in ids]
+                with_text = [(k, i) for k, i in cited if i in pages]
+                unchecked |= {k for k, i in cited if i not in pages}
+                if not with_text or len(with_text) < len(cited):
+                    continue  # a source without text might hold the number
+                if not any(has_number(i, n.text) for _, i in with_text):
+                    names = "、".join("@" + k for k, _ in with_text)
+                    add("warning", "number_mismatch", s, f"数字 {n.text} 在 {names} 的原文里找不到",
+                        citekey=with_text[0][0], number=n.text, start=n.start, end=n.end)
+            for k in sorted(unchecked):
+                add("info", "unchecked_source", s, f"@{k} 没有提取出正文，这一节引用它的引文和数字无法核对",
+                    citekey=k, item_id=ids[k])
 
     # -------------------------------------------------------------- reports
 

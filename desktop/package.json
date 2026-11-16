@@ -11,6 +11,8 @@
     "assemble": "node scripts/assemble.mjs",
     "dev": "tauri dev",
     "build": "tauri build",
+    "sidecar": "bash sidecar/build.sh",
+    "build:local": "bash sidecar/build.sh && tauri build --config src-tauri/tauri.local.conf.json",
     "icons": "tauri icon icons/app-icon.svg",
     "test": "node --test tests/*.test.mjs",
     "tauri": "tauri"

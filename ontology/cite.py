@@ -100,6 +100,138 @@ def claims(body: str) -> list[Claim]:
     return out
 
 
+# ------------------------------------------------------------------ quotes and numbers next to citations
+
+BRACKET_CITE = re.compile(r"\[([^\[\]\n]*@[^\[\]\n]*)\]")
+INLINE_QUOTE = re.compile(r"(?:“([^“”\n]{4,3000})”|\"([^\"\n]{4,3000})\"|「([^「」\n]{4,3000})」|『([^『』\n]{4,3000})』)"
+                          r"[ \t]*[（(]?[ \t]*(?=\[[^\[\]\n]*@)")
+PAGE = re.compile(r"(?:\bpp?\.|\bpages?\b|\bS\.|第|页)\s*(\d{1,5})", re.I)
+NUMBER = re.compile(r"(?<![\w.,])[-−]?\d{1,3}(?:,\d{3})+(?:\.\d+)?%?|(?<![\w.,])[-−]?\d+(?:\.\d+)?\s*%?")
+YEAR = re.compile(r"(?:1[6-9]|20)\d\d")
+
+
+@dataclass
+class Cited:
+    """A run of text that a citation vouches for: a quoted passage, or a number in a citing sentence."""
+    text: str
+    start: int          # offsets in the section body
+    end: int
+    citekeys: list[str]
+    page: int | None = None
+
+
+def _locator(cite_text: str) -> int | None:
+    m = PAGE.search(cite_text)
+    return int(m.group(1)) if m else None
+
+
+def _keys(cite_text: str) -> list[str]:
+    return [k for k in dict.fromkeys(m.group(1).rstrip(".,;:") for m in CITE.finditer(cite_text)) if k]
+
+
+def quotes(body: str) -> list[Cited]:
+    """Quoted passages followed by a citation: “…”[@key, p. 3], and block quotes whose last line (or the line after)
+    is a citation. The page is the citation's locator when it has one and cites a single source."""
+    text = visible(body)
+    out: list[Cited] = []
+    for m in INLINE_QUOTE.finditer(text):
+        c = BRACKET_CITE.match(text, m.end())
+        if not c:
+            continue
+        q = next(g for g in m.groups() if g is not None)
+        keys = _keys(c.group(1))
+        g = next(i for i in range(1, 5) if m.group(i) is not None)
+        out.append(Cited(q, m.start(g), m.end(g), keys, _locator(c.group(1)) if len(keys) == 1 else None))
+    lines = text.split("\n")
+    starts, pos = [], 0
+    for ln in lines:
+        starts.append(pos)
+        pos += len(ln) + 1
+    i = 0
+    while i < len(lines):
+        if not lines[i].lstrip().startswith(">"):
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and lines[j].lstrip().startswith(">"):
+            j += 1
+        block = [(starts[k] + lines[k].index(">") + 1, lines[k][lines[k].index(">") + 1:]) for k in range(i, j)]
+        joined_end = block[-1][0] + len(block[-1][1])
+        last = block[-1][1].rstrip()
+        c = None
+        tail = re.search(r"[（(]?\s*\[([^\[\]\n]*@[^\[\]\n]*)\][）)]?\s*$", last)
+        if tail:
+            c = tail.group(1)
+            joined_end = block[-1][0] + tail.start()
+        elif j < len(lines):
+            nxt = re.fullmatch(r"\s*(?:[—–-]+\s*)?[（(]?\s*\[([^\[\]\n]*@[^\[\]\n]*)\][）)]?\s*", lines[j])
+            c = nxt.group(1) if nxt else None
+        if c:
+            first = block[0][0] + (len(block[0][1]) - len(block[0][1].lstrip()))
+            quote = " ".join(text[a:a + len(t)].strip() for a, t in block)
+            if tail:
+                quote = quote[:len(quote) - len(last) + tail.start()].strip() if len(block) == 1 else \
+                    " ".join([*(t.strip() for _, t in block[:-1]), last[:tail.start()].strip()])
+            keys = _keys(c)
+            if len(quote) >= 4:
+                out.append(Cited(quote.strip().strip("“”\"「」"), first, joined_end, keys,
+                                 _locator(c) if len(keys) == 1 else None))
+        i = j
+    out.sort(key=lambda q: q.start)
+    return out
+
+
+def number_value(token: str) -> float | None:
+    t = token.replace(",", "").replace("−", "-").replace("%", "").strip()
+    try:
+        return float(t)
+    except ValueError:
+        return None
+
+
+def numbers(body: str) -> list[Cited]:
+    """Numbers in sentences that cite a source, outside the citation itself and outside quotes (those are checked
+    whole). Left out, so the check stays quiet: years, numbers below 10 without a decimal or a %, and numbers in
+    headings, lists' markers, footnote marks, links and claim attributes."""
+    text = visible(body)
+    masked = list(text)
+
+    def blank(a: int, b: int) -> None:
+        for k in range(a, b):
+            if masked[k] != "\n":
+                masked[k] = " "
+
+    for m in BRACKET_CITE.finditer(text):
+        blank(m.start(), m.end())
+    for m in ATTRS.finditer(text):
+        blank(m.start(), m.end())
+    for m in re.finditer(r"\]\([^)\n]*\)|<[^>\n]+>|\[\^[^\]\n]*\]|https?://\S+", text):
+        blank(m.start(), m.end())
+    for q in quotes(body):
+        blank(q.start, q.end)
+    for m in re.finditer(r"(?m)^(?:\s*#{1,6}\s.*|\s*(?:\d+[.)]|[-*+])\s)", text):
+        blank(m.start(), m.end() if not m.group(0).lstrip().startswith("#") else m.end())
+    plain_text = "".join(masked)
+    out: list[Cited] = []
+    bounds = [m.end() for m in re.finditer(r"[。！？!?；\n]|\.(?=\s)", plain_text)] + [len(text)]
+    s = 0
+    for e in bounds:
+        keys = citekeys(text[s:e])
+        if keys:
+            for m in NUMBER.finditer(plain_text, s, e):
+                tok = m.group(0).strip()
+                v = number_value(tok)
+                if v is None:
+                    continue
+                whole = re.sub(r"[,%\s−-]", "", tok)
+                if "%" not in tok and "." not in tok and "," not in tok:
+                    if abs(v) < 10 or YEAR.fullmatch(whole):
+                        continue
+                out.append(Cited(tok, m.start(), m.start() + len(tok), keys))
+        s = e
+    return out
+
+
 def plain(body: str) -> str:
     """Readable text of a body: claim spans keep their words, markup characters go."""
     text = visible(body)

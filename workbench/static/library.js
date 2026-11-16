@@ -8,6 +8,7 @@ import { KINDS, STANCES, typeOf } from "/static/vocab.js";
 import { confirmAction, download, onFileDrop, openExternal, pickAndUpload, request } from "/static/net.js";
 import { createReading } from "/static/reading.js";
 import { renderMarkdown } from "/static/markdown.js";
+import { PASSAGE_TYPE } from "/static/editor.js";
 
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -39,7 +40,7 @@ const ago = (iso) => {
   return new Date(iso).toLocaleDateString("zh-CN");
 };
 
-export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAgent }) {
+export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAgent, onOpen = () => {}, onGone = () => {}, citeInDraft = null }) {
   let side = "items";          // which list: "items" or "notes"
   let filter = { q: "", kind: "", tag: "" };
   let items = [], tags = [], notes = [];
@@ -286,6 +287,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       const pdf = data.files.some((f) => f.media_type === "application/pdf");
       view = { kind: "item", id, data, tab: tab || keepTab || (pdf ? "reading" : data.files.length ? "text" : "info"), text: null };
       setContext({ item_id: id });
+      onOpen("item", id, data.title);
       renderSide();
       renderItem();
     } catch (e) { fail(e); }
@@ -330,6 +332,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     if (!await confirmAction(`把「${view.data.title}」移出文献库？摘录和笔记会保留，可以在归档中恢复。`)) return;
     try {
       await api(`/api/library/${view.id}`, { method: "DELETE" });
+      onGone("item", view.id);
       toast("已移出文献库");
       show({ kind: "empty" });
       load();
@@ -354,6 +357,13 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     const modes = el("div", { class: "text-modes", role: "radiogroup", "aria-label": "原文显示方式", hidden: true });
     body.append(modes, reader);
     reader.addEventListener("mouseup", () => setTimeout(() => offerExcerpt(reader), 0));
+    reader.addEventListener("dragstart", (e) => {
+      const p = selectedPassage(reader);
+      if (!p || !e.dataTransfer) return;
+      e.dataTransfer.setData(PASSAGE_TYPE, JSON.stringify(p));
+      e.dataTransfer.effectAllowed = "copy";
+      selBar.hidden = true;
+    });
     reader.addEventListener("scroll", () => { selBar.hidden = true; });
     const hasPdf = it.files.some((f) => f.media_type === "application/pdf" || /\.pdf$/i.test(f.filename));
     if (hasPdf && view.layout === undefined) {
@@ -394,12 +404,21 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     } catch (e) { reader.replaceChildren(el("p", { class: "bad" }, e.message)); }
   }
 
-  function offerExcerpt(reader) {
+  /** The selected text in the reader as a passage the draft can cite: quote, page and the paper's cite key. */
+  function selectedPassage(reader) {
     const sel = getSelection();
     const quote = sel && !sel.isCollapsed ? paperReading.quote(sel).replace(/\s+/g, " ").trim() : "";
-    if (quote.length < 8 || !reader.contains(sel.anchorNode)) { selBar.hidden = true; return; }
+    if (quote.length < 8 || !reader.contains(sel.anchorNode) || view.kind !== "item") return null;
     const pageBox = (sel.anchorNode.nodeType === 1 ? sel.anchorNode : sel.anchorNode.parentElement).closest(".pg");
     const page = pageBox?.dataset.page ? Number(pageBox.dataset.page) : null;
+    return { item_id: view.id, citekey: view.data.citekey, page, quote };
+  }
+
+  function offerExcerpt(reader) {
+    const sel = getSelection();
+    const passage = selectedPassage(reader);
+    if (!passage) { selBar.hidden = true; return; }
+    const { quote, page } = passage;
     const rect = sel.getRangeAt(0).getBoundingClientRect();
     const make = async (andGround) => {
       selBar.hidden = true;
@@ -412,6 +431,8 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       } catch (e) { fail(e); }
     };
     selBar.replaceChildren(
+      citeInDraft ? el("button", { type: "button", class: "primary", title: "作为引文插入正在写的一节，并存为摘录；也可以直接把选中的文字拖到草稿里",
+        onclick: async () => { selBar.hidden = true; if (await citeInDraft(passage)) getSelection().removeAllRanges(); } }, "引用到草稿") : null,
       el("button", { type: "button", onclick: () => make(false) }, "摘录"),
       el("button", { type: "button", onclick: () => make(true) }, "摘录并关联节点"),
       el("button", { type: "button", onclick: () => { selBar.hidden = true; askAgent(`关于 [@${view.data.citekey}]${page ? ` 第 ${page} 页` : ""}的这段话：「${quote.slice(0, 600)}」\n`, false); } }, "问 Agent"));
@@ -447,7 +468,14 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       comment.addEventListener("change", async () => {
         try { await api(`/api/excerpts/${ex.id}`, { method: "PATCH", json: { comment: comment.value } }); } catch (e) { fail(e); }
       });
-      body.append(el("article", { class: "excerpt" },
+      const passage = { item_id: view.id, citekey: view.data.citekey, page: ex.page, quote: ex.quote, excerpt_id: ex.id };
+      body.append(el("article", { class: "excerpt", draggable: citeInDraft ? "true" : null, title: citeInDraft ? "拖到草稿里引用" : null,
+        ondragstart: (e) => {
+          if (!citeInDraft || e.target.closest("textarea, button") || !e.dataTransfer) return;
+          e.dataTransfer.setData(PASSAGE_TYPE, JSON.stringify(passage));
+          e.dataTransfer.setData("text/plain", ex.quote);
+          e.dataTransfer.effectAllowed = "copy";
+        } },
         el("blockquote", {}, ex.quote),
         el("div", { class: "ex-meta" }, ex.page != null ? `第 ${ex.page} 页` : "", !ex.verified && el("span", { class: "warn" }, "未在正文中定位"),
           el("span", { class: "dim" }, ex.author === "human" ? "你" : "Agent")),
@@ -455,6 +483,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
         ...(grounded.get(ex.id) || []).map(groundingRow),
         el("div", { class: "ex-acts" },
           el("button", { type: "button", class: "btn sm primary", onclick: () => groundDialog(ex) }, "关联到节点"),
+          citeInDraft ? el("button", { type: "button", class: "btn sm", onclick: () => citeInDraft(passage) }, "引用到草稿") : null,
           el("button", { type: "button", class: "btn sm", onclick: () => { setContext({ item_id: view.id, excerpt_id: ex.id }); askAgent("这条摘录能支持或反驳图里的哪些论断？", false); } }, "问 Agent"),
           el("button", { type: "button", class: "btn sm", onclick: () => deleteExcerpt(ex) }, "删除"))));
     }
@@ -640,6 +669,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
       const n = await api(`/api/notes/${encodeURIComponent(id)}`);
       view = { kind: "note", id, data: n };
       setContext({ note_id: id });
+      onOpen("note", id, n.title || "无标题笔记");
       renderSide();
       renderNote(focus);
     } catch (e) { fail(e); }
@@ -706,7 +736,7 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     const del = archived ? el("button", { type: "button", class: "btn sm primary", onclick: restore }, "恢复")
       : el("button", { type: "button", class: "btn sm", onclick: async () => {
         if (!await confirmAction(`归档笔记「${n.title}」？之后可以在笔记列表底部的「已归档的笔记」里恢复。`)) return;
-        try { await api(`/api/notes/${n.id}`, { method: "PATCH", json: { archived: true } }); show({ kind: "empty" }); load(); } catch (e) { fail(e); }
+        try { await api(`/api/notes/${n.id}`, { method: "PATCH", json: { archived: true } }); onGone("note", n.id); show({ kind: "empty" }); load(); } catch (e) { fail(e); }
       } }, "归档");
     main.replaceChildren(el("div", { class: "note" },
       archived && el("div", { class: "note-archived" }, "这篇笔记已归档，不在笔记列表里。",
@@ -818,5 +848,26 @@ export function initLibrary({ root, q, toast, nodes, openNode, setContext, askAg
     onMessage,
     openItem: (id, tab) => { side = "items"; return openItem(id, tab); },
     openCitekey: (key) => { side = "items"; return openCitekey(key); },
+    openNote: (id) => { side = "notes"; return openNote(id); },
+    /** Scroll 原文 to a page once it has rendered, and flash it. */
+    async showPage(page) {
+      for (let i = 0; i < 40; i++) {
+        const box = root.querySelector(`.reader .pg[data-page="${page}"]`);
+        if (box) {
+          box.scrollIntoView({ block: "start", behavior: "smooth" });
+          box.classList.add("flash");
+          setTimeout(() => box.classList.remove("flash"), 1800);
+          return true;
+        }
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      toast(`原文里没有第 ${page} 页`, true);
+      return false;
+    },
+    /** Start adding something, from the command palette. */
+    start: (what) => ({ add: () => { side = "items"; show({ kind: "add" }); }, scholarly: () => { side = "items"; show({ kind: "scholarly" }); },
+                        upload: uploadNew, import: importFile, manual: manualItem, note: () => newNote() })[what]?.(),
+    /** What the main pane shows, for the shell's status bar and tabs. */
+    current: () => (view.kind === "item" || view.kind === "note" ? { kind: view.kind, id: view.id } : null),
   };
 }

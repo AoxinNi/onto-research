@@ -1,5 +1,5 @@
-/* The workspace's writing mode: a manuscript as a column of sections, each edited in Pandoc Markdown with a live
-   preview, saved automatically against the revision it started from. The agent's suggestions show as a
+/* The workspace's writing mode: a manuscript as a column of sections, each edited in Pandoc Markdown (CodeMirror,
+   see editor.js) with a live preview, saved automatically against the revision it started from. The agent's suggestions show as a
    difference under the section they change and are accepted or rejected one by one. The right column lists the
    sources and claims of the section being edited and the citation check.
 
@@ -9,6 +9,7 @@
 import { STANCES, typeOf } from "/static/vocab.js";
 import { confirmAction, download, request } from "/static/net.js";
 import { renderMarkdown } from "/static/markdown.js";
+import { createEditor } from "/static/editor.js";
 
 const el = (tag, attrs = {}, ...children) => {
   const node = document.createElement(tag);
@@ -78,7 +79,7 @@ function diffView(a, b) {
 
 // ------------------------------------------------------------------ the mode
 
-export function initWriting({ root, q, toast, nodes, openNode, openItem, setContext, askAgent }) {
+export function initWriting({ root, q, toast, nodes, openNode, openItem, setContext, askAgent, onOpen = () => {}, onGone = () => {}, onCheck = () => {} }) {
   let visible = false;
   let list = [], styles = [], pandoc = true;
   let ms = null;               // the open manuscript
@@ -86,6 +87,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
   let refs = { entries: {}, order: [], items: {}, missing: [], numeric: true };
   let check = null;
   let current = null;          // section id being edited
+  let lastSection = null;      // the section the person last typed in (where passages from the reader go)
   let pane = "section";        // right column: "section" or "check"
   let preview = localStorage.getItem("onto.writing.preview") !== "0";
   let pendingRender = false;
@@ -185,11 +187,51 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
   async function loadRefs() {
     if (!ms) return;
     refs = await api(`/api/manuscripts/${ms.id}/references`).catch(() => refs);
+    for (const st of state.values()) st.editor?.redecorate();  // hover text on citations follows the references
   }
   async function loadCheck() {
     if (!ms) return;
-    check = await api(`/api/manuscripts/${ms.id}/check`).catch(() => check);
+    const id = ms.id;
+    const out = await api(`/api/manuscripts/${id}/check`).catch(() => null);
+    if (!out || ms?.id !== id) return;
+    check = out;
     renderIssuesBtn();
+    for (const st of state.values()) markProblems(st);
+    onCheck(problems());
+  }
+
+  /** Where an issue is in the text as it is now: its offsets if the snippet is still there, else the nearest copy. */
+  function locate(i, text) {
+    if (i.start == null) return null;
+    if (!i.snippet || text.slice(i.start, i.end) === i.snippet) return i.end <= text.length ? { from: i.start, to: i.end } : null;
+    let best = null;
+    for (let at = text.indexOf(i.snippet); at >= 0; at = text.indexOf(i.snippet, at + 1)) {
+      if (best == null || Math.abs(at - i.start) < Math.abs(best - i.start)) best = at;
+    }
+    return best == null ? null : { from: best, to: best + i.snippet.length };
+  }
+  function markProblems(st) {
+    if (!st?.editor) return;
+    const text = st.editor.value;
+    st.editor.setProblems((check?.issues || []).filter((i) => i.section_id === st.id)
+      .map((i) => ({ ...locate(i, text), level: i.level, message: i.message })).filter((p) => p.from != null));
+  }
+  const LEVEL_ORDER = { error: 0, warning: 1, info: 2 };
+  /** The open manuscript's check, in reading order, for the Problems panel. */
+  function problems() {
+    if (!ms || !check) return { manuscript: ms ? { id: ms.id, title: ms.title } : null, issues: [], counts: { error: 0, warning: 0, info: 0 } };
+    const order = new Map(ms.sections.map((s, k) => [s.id, k]));
+    const issues = [...check.issues].sort((a, b) => (order.get(a.section_id) ?? 1e9) - (order.get(b.section_id) ?? 1e9)
+      || LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level] || (a.start ?? 0) - (b.start ?? 0));
+    return { manuscript: { id: ms.id, title: ms.title }, issues, counts: check.counts };
+  }
+  /** Go to an issue: its section, and the marked text when it can still be found. */
+  function reveal(i) {
+    const st = state.get(i.section_id);
+    if (!st) return;
+    focusSection(i.section_id, true);
+    const at = st.editor && locate(i, st.editor.value);
+    if (at) setTimeout(() => st.editor.reveal(at.from, at.to), 350);
   }
   let checkTimer = null;
   function refreshSoon() {
@@ -213,6 +255,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
       return;
     }
     styleSel.value = ms.csl_style;
+    onOpen("manuscript", ms.id, ms.title, { words: ms.words, sections: ms.sections.length, style: styles.find((s) => s.id === ms.csl_style)?.label || ms.csl_style });
     const head = el("div", { class: "ms-head" },
       el("input", { type: "text", class: "ms-title", value: ms.title, "aria-label": "论文标题", onchange: (e) => patchMs({ title: e.target.value }) }),
       el("div", { class: "ms-meta-row" },
@@ -310,7 +353,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
     const title = keys.map((k) => refs.entries[k] ? `${refs.entries[k].text}${locs[k] ? `（${locs[k]}）` : ""}`
       : draft ? `@${k}：接受后编号` : `@${k}：文献库里没有这个引用键`).join("\n");
     return el("button", { type: "button", class: `ms-cite${missing.length ? (draft ? " draft" : " bad") : ""}`, title,
-      onclick: () => { const id = refs.items[known[0]]; if (id) openItem(id); } }, label + (missing.length && known.length ? " ?" : ""));
+      onclick: () => { const id = refs.items[known[0]]; if (id) openItem(id, pageOf(locs[known[0]])); } }, label + (missing.length && known.length ? " ?" : ""));
   }
 
   function claimSpan(nodeId, children) {
@@ -319,6 +362,12 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
       title: n ? `论断：${n.name}（点击在图谱中查看）` : "锚定的节点不在当前的图里",
       onclick: () => openNode(nodeId), onkeydown: (e) => { if (e.key === "Enter") openNode(nodeId); } }, ...children);
   }
+
+  /** "p. 4", "pp. 4–6", "第 4 页" → {page: 4}. */
+  const pageOf = (loc) => {
+    const m = /(?:\bpp?\.?|第|页)\s*(\d+)/i.exec(loc || "") || /^\s*(\d+)/.exec(loc || "");
+    return m ? { page: Number(m[1]) } : undefined;
+  };
 
   const ctx = { cite: citeChip, claim: claimSpan, intent: true };
   const draftCtx = { cite: (keys, locs, inText) => citeChip(keys, locs, inText, true), claim: claimSpan, intent: true };
@@ -352,33 +401,35 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
     const heading = el("input", { type: "text", class: "ms-h", value: st.heading, "aria-label": "节标题" });
     const level = el("select", { class: "ms-level", "aria-label": "层级" }, ...[1, 2, 3].map((n) => el("option", { value: n, selected: n === st.level }, ["一级", "二级", "三级"][n - 1])));
     const status = el("span", { class: "ms-status dim" }, st.dirty ? "未保存" : "");
-    const body = el("textarea", { class: "ms-body", value: st.body, spellcheck: "false", "aria-label": `${st.heading} 正文`,
-      placeholder: "用 Markdown 写这一节。输入 [@ 插入引用，[[ 锚定论断。" });
     const pv = el("div", { class: "ms-preview", "aria-label": "预览" });
     const sug = el("div", { class: "ms-sugs" });
     const banner = el("div", { class: "ms-conflict", hidden: true });
-    st.status = status; st.preview = preview ? pv : null; st.banner = banner; st.textarea = body; st.headingInput = heading;
-    const grow = () => { body.style.height = "auto"; body.style.height = `${Math.max(140, body.scrollHeight + 2)}px`; };
     const changed = () => {
-      st.body = body.value; st.heading = heading.value.trim() || st.heading; st.level = Number(level.value);
+      st.heading = heading.value.trim() || st.heading; st.level = Number(level.value);
       st.dirty = true; status.textContent = "未保存";
       clearTimeout(st.timer); st.timer = setTimeout(() => save(st), SAVE_AFTER);
       if (st.preview) st.preview.replaceChildren(...renderMarkdown(st.body, ctx));
-      grow();
     };
-    body.addEventListener("input", () => { changed(); complete(st); });
-    body.addEventListener("keydown", (e) => {
-      if (completion && completion.st === st && completeKey(e)) return;
-      if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); save(st); }
+    st.editor?.destroy();
+    const editor = createEditor({
+      doc: st.body, label: `${st.heading} 正文`,
+      placeholder: "用 Markdown 写这一节。输入 [@ 插入引用，[[ 锚定论断；也可以把文献原文里选中的段落拖进来。",
+      onChange: (value) => { st.body = value; changed(); },
+      onFocus: () => { lastSection = st.id; focusSection(s.id); },
+      onBlur: () => { if (pendingRender) setTimeout(maybeRender, 200); },
+      onSelect: (selection) => setContext({ manuscript_id: ms.id, section_id: s.id, selection }),
+      onSave: () => save(st),
+      complete: { cite: citeOptions, claim: claimOptions },
+      citeTitle: (k) => refs.entries[k]?.text || (refs.items?.[k] ? "" : `@${k}：文献库里没有这个引用键`),
+      onPassage: (passage) => passageText(passage),
+      actions: selectionActions(st),
     });
-    body.addEventListener("focus", () => focusSection(s.id));
-    body.addEventListener("select", () => setContext({ manuscript_id: ms.id, section_id: s.id, selection: body.value.slice(body.selectionStart, body.selectionEnd) }));
-    body.addEventListener("blur", () => { setTimeout(() => { if (completion?.st === st && !completion.box.contains(document.activeElement)) closeCompletion(); }, 150); if (pendingRender) setTimeout(maybeRender, 200); });
+    st.status = status; st.preview = preview ? pv : null; st.banner = banner; st.editor = editor; st.headingInput = heading;
     heading.addEventListener("input", () => { changed(); renderOutline(); });
     heading.addEventListener("focus", () => focusSection(s.id));
     level.addEventListener("change", () => { changed(); renderOutline(); });
     const tools = el("div", { class: "ms-tools" },
-      el("button", { type: "button", class: "btn sm", title: "插入引用", onclick: () => { body.focus(); openCompletion(st, "cite", body.selectionStart, body.selectionStart, ""); } }, "引用"),
+      el("button", { type: "button", class: "btn sm", title: "插入引用 · 输入 [@", onclick: () => editor.startCite() }, "引用"),
       el("button", { type: "button", class: "btn sm", title: "把选中的句子锚定到图中的论断", onclick: () => anchorSelection(st) }, "锚定论断"),
       el("button", { type: "button", class: "btn sm", onclick: () => revisionsDialog(st) }, "历史"),
       el("button", { type: "button", class: "btn sm", onclick: () => askAgent(`请读论文《${ms.title}》的「${st.heading}」（${s.id}），提出修改建议：论证更清楚，每个论断都有文献依据。`) }, "请 Agent 改"),
@@ -386,13 +437,13 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
     const card = el("section", { class: `ms-sec lv${st.level}${current === s.id ? " on" : ""}`, "data-id": s.id },
       el("div", { class: "ms-sec-head" }, level, heading, status, tools),
       banner,
-      el("div", { class: preview ? "ms-split" : "ms-split solo" }, body, preview ? pv : null),
+      el("div", { class: preview ? "ms-split" : "ms-split solo" }, editor.dom, preview ? pv : null),
       sug);
     st.card = card;
     for (const g of ms.suggestions.filter((g) => g.kind === "replace" && g.section_id === s.id)) sug.append(suggestionCard(g, st));
     if (st.preview) st.preview.replaceChildren(...renderMarkdown(st.body, ctx));
     if (st.conflict) showConflict(st);
-    requestAnimationFrame(grow);
+    markProblems(st);
     return card;
   }
 
@@ -407,7 +458,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
     if (scroll) {
       const st = state.get(id);
       st?.card?.scrollIntoView({ behavior: "smooth", block: "start" });
-      st?.textarea?.focus({ preventScroll: true });
+      st?.editor?.focus();
     }
   }
 
@@ -506,6 +557,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
   async function archiveMs() {
     if (!await confirmAction(`归档论文《${ms.title}》？归档后不再出现在列表里。`)) return;
     await patchMs({ archived: true });
+    onGone("manuscript", ms.id);
     ms = null;
     await loadList();
     open(list[0]?.id);
@@ -524,8 +576,8 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
       const busy = st.dirty || st.saving || st.card?.contains(document.activeElement);
       if (!busy && (s.rev !== st.rev)) {
         Object.assign(st, { rev: s.rev, heading: s.heading, body: s.body, level: s.level });
-        if (sameStructure && st.textarea) {
-          st.textarea.value = s.body; st.headingInput.value = s.heading;
+        if (sameStructure && st.editor) {
+          st.editor.setValue(s.body); st.headingInput.value = s.heading;
           if (st.preview) st.preview.replaceChildren(...renderMarkdown(s.body, ctx));
         }
       }
@@ -537,7 +589,7 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
   }
 
   function maybeRender() {
-    const typing = main.contains(document.activeElement) && /TEXTAREA|INPUT/.test(document.activeElement.tagName);
+    const typing = main.contains(document.activeElement) && (/TEXTAREA|INPUT/.test(document.activeElement.tagName) || document.activeElement.isContentEditable);
     if (typing || main.querySelector(".ms-dlg")) { pendingRender = true; return; }
     const top = main.scrollTop;
     render();
@@ -589,125 +641,96 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
 
   // ---------------------------------------------------------------- completion: [@ sources, [[ claims
 
-  let completion = null;
-
-  function complete(st) {
-    const ta = st.textarea, at = ta.selectionStart;
-    const before = ta.value.slice(Math.max(0, at - 80), at);
-    const cite = before.match(/(?:\[|;\s*)@([\w一-鿿:.-]*)$/);
-    const claim = before.match(/\[\[([^\]\n]{0,40})$/);
-    if (cite) openCompletion(st, "cite", at - cite[1].length - 1, at, cite[1]);
-    else if (claim) openCompletion(st, "claim", at - claim[1].length - 2, at, claim[1]);
-    else closeCompletion();
+  /** Library items for "[@query": the server matches cite keys, titles and authors. */
+  async function citeOptions(query) {
+    const p = new URLSearchParams({ limit: "12" });
+    if (query) p.set("q", query);
+    const out = await api(`/api/library?${p}`).catch(() => ({ items: [] }));
+    return out.items.map((it) => ({ key: it.citekey, title: it.title,
+      hint: `@${it.citekey} · ${(it.authors || "").split(";")[0]} ${it.year || ""}`.trim(),
+      info: it.abstract ? it.abstract.slice(0, 280) + (it.abstract.length > 280 ? "…" : "") : undefined }));
   }
 
-  function openCompletion(st, kind, from, to, query) {
-    if (!completion || completion.st !== st || completion.kind !== kind) {
-      closeCompletion();
-      const box = el("div", { class: "ms-complete glass", role: "listbox" });
-      st.card.append(box);
-      completion = { st, kind, box, items: [], index: 0 };
-    }
-    Object.assign(completion, { from, to, query });
-    const ta = st.textarea;
-    completion.box.style.top = `${ta.offsetTop + ta.offsetHeight + 4}px`;
-    completion.box.style.width = `${Math.max(280, ta.offsetWidth)}px`;
-    fill();
+  /** Graph nodes for "[[query": a typed name narrows the list; a selected sentence ranks nodes by the characters
+      and words they share. Claims, hypotheses and findings come first. */
+  function claimOptions(query) {
+    const needle = query.trim().toLowerCase();
+    const grams = new Set(needle.match(/[㐀-鿿]{2}|[a-z0-9]{3,}/g) || []);
+    for (let i = 0; i + 1 < needle.length; i++) if (/[㐀-鿿]{2}/.test(needle.slice(i, i + 2))) grams.add(needle.slice(i, i + 2));
+    const score = (n) => {
+      const names = [n.name, ...(n.aliases || [])].map((x) => x.toLowerCase());
+      let s = ["Claim", "Hypothesis", "Observation", "Finding"].includes(n.type) ? 1 : 0;
+      if (!needle) return s;
+      if (names.some((x) => x.includes(needle) || needle.includes(x))) s += 100;
+      for (const g of grams) if (names.some((x) => x.includes(g))) s += 10;
+      return s;
+    };
+    const ranked = nodes().map((n) => [score(n), n]).sort((a, b) => b[0] - a[0]);
+    const hits = needle ? ranked.filter(([s]) => s >= 10) : ranked;
+    return (hits.length ? hits : ranked).slice(0, 12).map(([, n]) => ({ value: n.id, label: n.name, hint: typeOf(n.type).label }));
   }
-
-  let fillSeq = 0;
-  async function fill() {
-    const c = completion, seq = ++fillSeq;
-    if (!c) return;
-    let items;
-    if (c.kind === "cite") {
-      const p = new URLSearchParams({ limit: "12" });
-      if (c.query) p.set("q", c.query);
-      const out = await api(`/api/library?${p}`).catch(() => ({ items: [] }));
-      items = out.items.map((it) => ({ value: it.citekey, label: it.title, hint: `@${it.citekey} · ${(it.authors || "").split(";")[0]} ${it.year || ""}` }));
-    } else {
-      // A typed name narrows the list; a selected sentence ranks nodes by the characters and words they share.
-      const needle = c.query.trim().toLowerCase();
-      const grams = new Set(needle.match(/[㐀-鿿]{2}|[a-z0-9]{3,}/g) || []);
-      for (let i = 0; i + 1 < needle.length; i++) if (/[㐀-鿿]{2}/.test(needle.slice(i, i + 2))) grams.add(needle.slice(i, i + 2));
-      const score = (n) => {
-        const names = [n.name, ...(n.aliases || [])].map((x) => x.toLowerCase());
-        let s = ["Claim", "Hypothesis", "Observation", "Finding"].includes(n.type) ? 1 : 0;
-        if (!needle) return s;
-        if (names.some((x) => x.includes(needle) || needle.includes(x))) s += 100;
-        for (const g of grams) if (names.some((x) => x.includes(g))) s += 10;
-        return s;
-      };
-      const ranked = nodes().map((n) => [score(n), n]).sort((a, b) => b[0] - a[0]);
-      const hits = needle ? ranked.filter(([s]) => s >= 10) : ranked;
-      items = (hits.length ? hits : ranked).slice(0, 12)
-        .map(([, n]) => ({ value: n.id, label: n.name, hint: typeOf(n.type).label, color: typeOf(n.type).color }));
-    }
-    if (seq !== fillSeq || completion !== c) return;
-    c.items = items; c.index = 0;
-    drawCompletion();
-    c.box.scrollIntoView({ block: "nearest" });
-  }
-
-  function drawCompletion() {
-    const c = completion;
-    c.box.replaceChildren(
-      el("div", { class: "ms-complete-head dim" }, c.kind === "cite" ? "插入引用 · ↑↓ 选择，回车确认" : "锚定论断 · ↑↓ 选择，回车确认"),
-      ...(c.items.length ? c.items.map((it, i) => el("button", { type: "button", role: "option", class: i === c.index ? "on" : "",
-        "aria-selected": String(i === c.index), onmousedown: (e) => { e.preventDefault(); c.index = i; applyCompletion(); } },
-        it.color ? el("i", { style: `--c:${it.color}` }) : null, el("span", {}, it.label), el("small", {}, it.hint)))
-        : [el("div", { class: "dim ms-complete-none" }, c.kind === "cite" ? "文献库里没有匹配的文献" : "没有匹配的节点")]));
-  }
-
-  function completeKey(e) {
-    const c = completion;
-    if (e.key === "Escape") { closeCompletion(); e.preventDefault(); return true; }
-    if (!c.items.length) return false;
-    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
-      c.index = (c.index + (e.key === "ArrowDown" ? 1 : -1) + c.items.length) % c.items.length;
-      drawCompletion(); e.preventDefault(); return true;
-    }
-    if ((e.key === "Enter" || e.key === "Tab") && !e.isComposing) { applyCompletion(); e.preventDefault(); return true; }
-    return false;
-  }
-
-  function applyCompletion() {
-    const c = completion, it = c.items[c.index], ta = c.st.textarea;
-    if (!it) return;
-    let ins, caret;
-    if (c.kind === "cite") {
-      const opened = ta.value.slice(c.from - 1, c.from) === "[";
-      const fromInsertButton = c.from === c.to && ta.value.slice(c.from - 1, c.from) !== "@" && !opened;
-      if (fromInsertButton) { ins = `[@${it.value}]`; caret = c.from + ins.length; ta.setRangeText(ins, c.from, c.to, "end"); }
-      else {
-        const start = c.from;            // the "@"
-        const closeAfter = opened && ta.value[c.to] !== "]";
-        ins = `@${it.value}${closeAfter ? "]" : ""}`;
-        ta.setRangeText(ins, start, c.to, "end");
-        caret = start + ins.length;
-      }
-    } else {
-      const text = c.query.trim() || it.label;
-      ins = `[${text}]{.claim node=${it.value}}`;
-      ta.setRangeText(ins, c.from, c.to, "end");
-      caret = c.from + ins.length;
-    }
-    ta.selectionStart = ta.selectionEnd = caret;
-    closeCompletion();
-    ta.dispatchEvent(new Event("input"));
-    ta.focus();
-  }
-
-  function closeCompletion() { completion?.box.remove(); completion = null; }
 
   function anchorSelection(st) {
-    const ta = st.textarea;
-    const a = ta.selectionStart, b = ta.selectionEnd;
-    if (a === b) { toast("先在正文里选中要锚定的句子", true); return; }
-    const chosen = ta.value.slice(a, b).replace(/[[\]]/g, "");
-    ta.setRangeText(`[[${chosen}`, a, b, "end");
-    ta.focus();
-    openCompletion(st, "claim", a, a + chosen.length + 2, chosen);
+    if (!st.editor?.startClaim()) toast("先在正文里选中要锚定的句子", true);
+  }
+
+  // ---------------------------------------------------------------- passages from the reader
+
+  /* A passage selected in a paper's 原文 becomes a quotation with a citation that points at its page, and an
+     excerpt in the library, so the quote can be traced back. Short passages go inline, long ones as a block quote. */
+  async function passageText(p) {
+    if (!p?.citekey || !p.quote) return "";
+    let page = p.page ?? null;
+    if (!p.excerpt_id && p.item_id) {
+      try { await api(`/api/library/${encodeURIComponent(p.item_id)}/excerpts`, { method: "POST", json: { quote: p.quote, page } }); }
+      catch (e) { toast(`没能保存摘录：${e.message}`, true); }
+    }
+    const cite = `[@${p.citekey}${page != null ? `, p. ${page}` : ""}]`;
+    const quote = p.quote.replace(/\s+/g, " ").trim();
+    if (quote.length > 220) return `\n\n> ${quote} ${cite}\n\n`;
+    return ms?.lang === "en-US" ? `"${quote}" ${cite}` : `“${quote}”${cite}`;
+  }
+
+  /* Commands on selected text. The agent answers in the chat; a rewrite comes back as a suggestion (a diff) that
+     the person accepts or rejects. */
+  function selectionPrompt(kind, st, sel) {
+    const where = `论文《${ms.title}》（${ms.id}）的「${st.heading}」（${st.id}，版本 ${st.rev}）`;
+    const text = sel.text.trim().replace(/\n/g, "\n> ");
+    return {
+      rewrite: `请改写${where}中的这段文字，让它更清楚、更准确；保留其中的引用和论断锚点，不要加入原文没有的事实。先用 read_section 读这一节，再用 suggest_edit 提交整节的修改建议，只改这一段：\n\n> ${text}`,
+      support: `请在文献库里为${where}中的这段话找支持它的文献：用 search_library 搜，用 read_item 读原文，列出引用键、页码和原文句子；只引用读到的原文。\n\n> ${text}`,
+      counter: `请在文献库里找与${where}中这段话相反或限制它的证据：用 search_library 和 read_item，列出引用键、页码和原文句子，并说明它们怎样削弱这段话。\n\n> ${text}`,
+      verify: `请核对${where}中这段文字里的引文、数字和引用是否与所引文献的原文一致（用 read_item 读原文），逐条说明哪些对、哪些不对、原文怎么写。\n\n> ${text}`,
+      ask: `关于${where}中的这段：\n\n> ${text}\n\n`,
+    }[kind];
+  }
+  /** Run a selection command on the editor the person was last in (or the one given). */
+  function runOnSelection(kind, st = state.get(lastSection) || state.get(current), sel = st?.editor?.selection()) {
+    if (!ms || !st) { toast("先在写作里打开一篇论文", true); return false; }
+    if (!sel?.text?.trim()) { toast("先在正文里选中一段文字", true); return false; }
+    askAgent(selectionPrompt(kind, st, sel), kind !== "ask");
+    return true;
+  }
+  function selectionActions(st) {
+    const run = (kind) => (sel) => runOnSelection(kind, st, sel);
+    return [
+      { label: "改写", title: "请 Agent 改写这段，以修改建议的形式给出", run: run("rewrite") },
+      { label: "找支持", title: "在文献库里找支持这段话的原文", run: run("support") },
+      { label: "找反例", title: "在文献库里找相反或限制它的证据", run: run("counter") },
+      { label: "核对", title: "核对这段的引文和数字是否与原文一致", run: run("verify") },
+      { label: "问 Agent…", title: "把这段放进对话框，自己写问题", run: run("ask") },
+    ];
+  }
+
+  /** Put a passage where the person was last writing (the section they last typed in, at its caret). */
+  async function insertPassage(p) {
+    if (!ms) { toast("先在写作里打开或新建一篇论文", true); return false; }
+    const st = state.get(lastSection) || state.get(current) || state.get(ms.sections[0]?.id);
+    if (!st?.editor) { toast("这篇论文还没有可以写的一节", true); return false; }
+    await st.editor.insertPassage(p);
+    focusSection(st.id);
+    st.card?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return true;
   }
 
   // ---------------------------------------------------------------- the right column
@@ -744,9 +767,9 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
   function renderCheck(body) {
     if (!check) { body.append(el("p", { class: "dim" }, "检查中…")); return; }
     const label = { error: "错误", warning: "提醒", info: "提示" };
-    if (!check.issues.length) body.append(el("p", { class: "ok" }, "没有发现问题：引用键都在文献库里，锚定的论断都有依据。"));
+    if (!check.issues.length) body.append(el("p", { class: "ok" }, "没有发现问题：引用键都在文献库里，锚定的论断都有依据，引文和数字与原文一致。"));
     for (const i of check.issues) {
-      body.append(el("button", { type: "button", class: `ms-issue ${i.level}`, onclick: () => focusSection(i.section_id, true) },
+      body.append(el("button", { type: "button", class: `ms-issue ${i.level}`, onclick: () => reveal(i) },
         el("span", { class: "lvl" }, label[i.level]), el("span", {}, i.message), el("small", {}, i.heading)));
     }
     body.append(el("button", { type: "button", class: "btn sm", onclick: async () => { await loadCheck(); renderAside(); } }, "重新检查"));
@@ -894,9 +917,29 @@ export function initWriting({ root, q, toast, nodes, openNode, openItem, setCont
       } catch (e) { fail(e); }
       if (ms) setContext({ manuscript_id: ms.id, section_id: current });
     },
-    hide() { visible = false; root.hidden = true; flushAll(); closeCompletion(); setContext(null); },
+    hide() { visible = false; root.hidden = true; flushAll(); setContext(null); },
     onMessage,
     insertReport,
+    /** Open a manuscript (and scroll to one of its sections), from a tab or quick open. */
+    async openManuscript(id, sectionId) {
+      if (ms?.id !== id) await open(id);
+      if (sectionId && ms?.sections.some((s) => s.id === sectionId)) focusSection(sectionId, true);
+    },
+    newManuscript: () => newDialog(),
+    insertPassage,
+    hasManuscript: () => Boolean(ms),
+    export: (fmt, formatted) => doExport(fmt, formatted),
+    current: () => ms && { id: ms.id, title: ms.title, sections: ms.sections.map((s) => ({ id: s.id, heading: s.heading, level: s.level })) },
     onGraph() { if (visible && ms) { loadCheck().then(() => { renderAllPreviews(); renderAside(); }); } },
+    problems,
+    /** Run the check again now (the Problems panel's refresh). */
+    async recheck() { await flushAll(); await loadCheck(); renderAside(); return problems(); },
+    /** Open a problem's manuscript if needed and go to the problem. */
+    async reveal(issue, manuscriptId) {
+      if (manuscriptId && ms?.id !== manuscriptId) await open(manuscriptId);
+      reveal(issue);
+    },
+    /** Selection commands: "rewrite", "support", "counter", "verify", "ask". */
+    onSelection: (kind) => runOnSelection(kind),
   };
 }

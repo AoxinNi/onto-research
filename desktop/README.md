@@ -54,7 +54,7 @@ npm ci
 npm run dev            # 组装 dist/ 并打开原生窗口
 ```
 
-默认连接 `http://127.0.0.1:8766`。先在仓库根目录启动本机工作台（`./start-workbench.sh`）。本机模式不需要登录，应用启动后直接进入项目总览。要连接云端，在登录页底部「服务器」中填写 HTTPS 地址，或在构建时设置 `ONTO_DEFAULT_SERVER`。
+默认连接 `http://127.0.0.1:8766`。先在仓库根目录启动本机工作台（`./start-workbench.sh`）；没有设置 `DATABASE_URL` 且装了 `onto-research[local]` 时，它会用内置的 PostgreSQL（数据在 `~/Library/Application Support/onto-research`），不需要 Docker。本机模式不需要登录，应用启动后直接进入项目总览。要连接云端，在登录页底部「服务器」中填写 HTTPS 地址，或在构建时设置 `ONTO_DEFAULT_SERVER`。
 
 修改 `workbench/static` 下的页面后，重新运行 `npm run dev` 即可（`npm run assemble` 会把页面复制到 `dist/`）。网页版和桌面端共用同一份代码。新增的网络调用请使用 `net.js`，不要直接调用 `fetch` 或 `WebSocket`。新增的 Rust 命令要同时登记在 `build.rs` 和 `capabilities/main.json` 中。
 
@@ -67,6 +67,19 @@ cargo clippy --all-targets -- -D warnings && cargo fmt --check
 ```
 
 服务端测试在仓库根目录运行 `pytest`（`tests/test_desktop_client.py` 覆盖桌面模式）。
+
+## 本机版：内置工作台（sidecar）
+
+`npm run build:local` 先运行 `sidecar/build.sh`，用 PyInstaller 把工作台服务和内置 PostgreSQL 16 打成一个可执行文件
+（`src-tauri/binaries/onto-workbench-<目标三元组>`，约 39 MB），再通过 `src-tauri/tauri.local.conf.json` 把它作为
+`externalBin` 打进应用。普通的 `npm run build` 和 `cargo test` 不需要这个文件。
+
+应用启动时，如果服务器是默认的本机地址、该地址没有服务在运行、并且应用旁边有 `onto-workbench`，就由
+`src-tauri/src/sidecar.rs` 启动它，并等它就绪（最长 90 秒；第一次启动要创建数据库，约 15–30 秒）。退出应用时发送
+SIGTERM，服务会连同 PostgreSQL 一起停止。日志写在应用日志目录的 `workbench.log`。在命令面板中可以把项目快照保存到
+`~/Library/Application Support/onto-research/projects/<项目>`（Markdown、BibTeX、CSL-JSON），也可以用 git 提交。
+
+尚未验证：完整的 `tauri build` 产物、全新的 Mac、内嵌 PostgreSQL 程序的签名与公证、Intel Mac、Windows 与 Linux。
 
 ## 发布前检查
 

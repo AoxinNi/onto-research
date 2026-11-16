@@ -60,7 +60,9 @@ def _own_paper_cache(monkeypatch, tmp_path):
 @pytest.fixture
 def conn():
     params = conninfo_to_dict(TEST_URL)
-    if params.get("dbname") != "onto_research_test" or params.get("host") not in {"127.0.0.1", "localhost", "::1"}:
+    host = params.get("host") or ""
+    local = host in {"127.0.0.1", "localhost", "::1"} or host.startswith("/")  # a Unix socket: the embedded server
+    if params.get("dbname") != "onto_research_test" or not local:
         pytest.fail("Tests require the dedicated local onto_research_test database.")
     c = connect(TEST_URL)
     for r in c.execute("SELECT nspname FROM pg_namespace WHERE starts_with(nspname, 'onto_research_p_')").fetchall():

@@ -29,6 +29,7 @@ from pydantic import BaseModel
 
 from ontology import bigbang, collector, custom_sources, evidence, history, mcp_clients, mcp_server, mineru, news, projects, reports, ths
 from ontology import providers as providers_mod
+from ontology import snapshot as snapshots
 from ontology import sources as sources_mod
 from ontology.db import connect
 from ontology.errors import OntologyError
@@ -347,6 +348,31 @@ def bigbang_projects(body: BigBangIn) -> dict[str, Any]:
 def export_project(project: str) -> JSONResponse:
     doc = _registry(lambda c: projects.export(c, project))
     return _download(doc, f"{doc['project']['name']}.json")
+
+
+class SnapshotIn(BaseModel):
+    git: bool | None = None       # None: commit when the folder is already a git repository
+    message: str | None = None
+
+
+@app.get("/api/projects/{project}/snapshot")
+def last_snapshot(project: str) -> dict[str, Any]:
+    """Whether snapshots are on here, where they go, and the last one."""
+    if not snapshots.enabled():
+        return {"enabled": False}
+    try:
+        return {"enabled": True, "folder": str(snapshots.folder_for(project)), "last": snapshots.last(project)}
+    except OntologyError as e:
+        raise HTTPException(status_code=404, detail=str(e)) from None
+
+
+@app.post("/api/projects/{project}/snapshot")
+async def take_snapshot(project: str, body: SnapshotIn) -> dict[str, Any]:
+    """Write the project to its folder as plain files (ontology/snapshot.py), and commit them when asked."""
+    if not snapshots.enabled():
+        raise HTTPException(status_code=404, detail="快照只在本机运行时可用")
+    message = (body.message or "").strip()[:200] or None
+    return await asyncio.to_thread(_registry, lambda c: snapshots.write(c, project, body.git, message))
 
 
 def _download(doc: dict[str, Any], filename: str) -> JSONResponse:
@@ -1006,8 +1032,20 @@ manuscripts_api.install(app, broadcast=broadcast)
 
 
 def main() -> None:
+    import signal
+
     import uvicorn
 
+    from ontology import localdb
+
+    def stop(signum: int, _frame: Any) -> None:
+        # uvicorn shuts down cleanly, restores these handlers and raises the signal again. Exit handlers do not run
+        # for a process ended by a signal, so the embedded Postgres is stopped here (a no-op without one).
+        localdb.stop()
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, stop)
     uvicorn.run(app, host=os.environ.get("WORKBENCH_HOST", "127.0.0.1"), port=int(os.environ.get("WORKBENCH_PORT", "8766")))
 
 

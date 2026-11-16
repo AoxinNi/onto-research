@@ -8,6 +8,7 @@ mod backend;
 mod config;
 mod credentials;
 mod error;
+mod sidecar;
 mod socket;
 mod wechat;
 
@@ -18,7 +19,9 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{
+    AppHandle, DragDropEvent, Emitter, Manager, RunEvent, State, WebviewUrl, WebviewWindowBuilder, WindowEvent,
+};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 use tauri_plugin_opener::OpenerExt;
 use tokio::sync::oneshot;
@@ -28,6 +31,7 @@ use backend::{safe_filename, ApiResponse, Backend, BootState};
 use config::Settings;
 use credentials::Keychain;
 use error::{AppError, Result};
+use sidecar::Sidecar;
 use socket::{SocketEvent, Sockets};
 
 const MAIN_WINDOW: &str = "main";
@@ -41,6 +45,8 @@ struct AppState {
     backend: Backend,
     sockets: Sockets,
     drops: Drops,
+    /// The bundled local workbench, when the app started one.
+    sidecar: Sidecar,
 }
 
 /// Files dropped on the window. The page learns only their names and a one-time ticket; it uploads one by
@@ -165,6 +171,7 @@ fn server_set(url: Option<String>, state: State<'_, AppState>) -> Result<ServerI
 
 #[tauri::command]
 async fn session_boot(state: State<'_, AppState>) -> Result<Boot> {
+    state.sidecar.ready().await;
     let boot = state.backend.boot().await?;
     Ok(Boot { server: state.server_info(), state: boot })
 }
@@ -358,11 +365,16 @@ pub fn run() {
             let settings = Settings::load(&config_dir);
             let backend = Backend::new(settings.server.clone(), Arc::new(Keychain))?;
             log::info!("{APP_NAME} {} starting; server {}", env!("CARGO_PKG_VERSION"), settings.server);
+            let sidecar = Sidecar::default();
+            if settings.is_default() {
+                sidecar.start(&settings.server, &app.path().app_log_dir()?);
+            }
             app.manage(AppState {
                 settings: Mutex::new(settings),
                 backend,
                 sockets: Sockets::default(),
                 drops: Drops::default(),
+                sidecar,
             });
 
             let dev_origin = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
@@ -423,8 +435,13 @@ pub fn run() {
             socket_close,
             wechat_login,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the ONTO Research desktop app");
+        .build(tauri::generate_context!())
+        .expect("error while building the ONTO Research desktop app")
+        .run(|app, event| {
+            if let RunEvent::Exit = event {
+                app.state::<AppState>().sidecar.stop();
+            }
+        });
 }
 
 #[cfg(test)]

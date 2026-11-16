@@ -8,6 +8,7 @@ from ontology.library import Library
 from ontology.manuscripts import Manuscripts, SectionConflict
 from ontology.store import OntologyStore
 from tests.conftest import TEST_URL
+from tests.pdfgen import make_pdf
 
 LLM = {"kind": "llm_prior"}
 PAPER = {"type": "article-journal", "title": "Screen use before bed", "author": [{"family": "Zhang", "given": "Wei"}],
@@ -157,6 +158,42 @@ def test_renaming_a_citekey_rewrites_papers_and_notes_and_cited_sources_stay(res
     ms.save_section(sec["id"], 2, body="不再引用。")
     lib.archive_item(it["id"])
     assert ms.check(m["id"])["issues"] == []
+
+
+def test_quotes_and_numbers_are_checked_against_the_source(research):
+    ms, lib = research["ms"], research["lib"]
+    pages = ["Screen use before bed\nWe surveyed 1,200 students in Shanghai.",
+             "Results\nEvening screen time predicted a later sleep onset (r = 0.32).\n23.4% slept less than seven hours.",
+             "Discussion\nThe effect held in girls only."]
+    zhang = lib.add_item(PAPER, {"kind": "manual"})["item"]
+    lib.add_file(zhang["id"], "zhang.pdf", make_pdf(pages, title="Screen use"), "application/pdf")
+    bare = lib.add_item({**PAPER, "title": "No file", "DOI": "10.1/99", "author": [{"family": "Li"}]},
+                        {"kind": "manual"})["item"]
+    z, b = zhang["citekey"], bare["citekey"]
+    body = (f"“Evening screen time predicted a later sleep onset”[@{z}, p. 2]. "
+            f"“Evening screen time predicted an earlier sleep onset”[@{z}, p. 2]. "
+            f"“The effect held in girls only”[@{z}, p. 1]. "
+            f"They surveyed 1,200 students and 23% slept little [@{z}]. "
+            f"They surveyed 1,500 students [@{z}]. In 2023 the effect was 0.32 [@{z}]. "
+            f"Li found 45 cases [@{b}].\n\n"
+            f"> We surveyed 1,200 students\n> in Shanghai. [@{z}, p. 1]\n")
+    m = ms.create("核对", sections=[{"heading": "结果", "body": body}])
+    out = ms.check(m["id"])
+    got = sorted((i["code"], body[i["start"]:i["end"]] if i["start"] is not None else None) for i in out["issues"])
+    assert got == [("number_mismatch", "1,500"),
+                   ("quote_mismatch", "Evening screen time predicted an earlier sleep onset"),
+                   ("quote_page", "The effect held in girls only"),
+                   ("unchecked_source", None)], got
+    page = next(i for i in out["issues"] if i["code"] == "quote_page")
+    assert page["page"] == 3 and page["level"] == "warning"
+
+
+def test_quote_and_number_extraction():
+    body = ("“甲乙丙丁戊己庚”[@a, 第 5 页]，增长了 12.5%（[@a]）。共 3 组 [@a]。\n"
+            "## 2 方法\n1. 第一步 [@b]\n见 [链接](http://x.org/42) [@b]。")
+    [q] = cite.quotes(body)
+    assert (q.text, q.citekeys, q.page) == ("甲乙丙丁戊己庚", ["a"], 5)
+    assert [n.text for n in cite.numbers(body)] == ["12.5%"]
 
 
 def test_a_report_becomes_a_draft_section_with_anchors_and_citations(research):
