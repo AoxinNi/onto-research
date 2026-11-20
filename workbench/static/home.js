@@ -1,5 +1,6 @@
 /* Project list and MCP page. Each card draws a small constellation of its project's busiest nodes. */
 import { typeOf } from "/static/vocab.js";
+import { confirmAction, currentView, download, go, request, routes } from "/static/net.js";
 
 const $ = (sel) => document.querySelector(sel);
 const el = (tag, attrs = {}, ...children) => {
@@ -16,6 +17,7 @@ const el = (tag, attrs = {}, ...children) => {
 };
 const svg = (markup) => { const t = document.createElement("template"); t.innerHTML = markup.trim(); return t.content.firstChild; };
 const REDUCED = matchMedia("(prefers-reduced-motion: reduce)").matches;
+let cloudWorkspace = false;
 
 function ago(iso) {
   if (!iso) return "—";
@@ -33,7 +35,8 @@ function toast(text, bad = false) {
 }
 
 async function api(url, opts = {}) {
-  const res = await fetch(url, { headers: { "Content-Type": "application/json" }, ...opts });
+  const res = await request(url, { headers: { "Content-Type": "application/json" }, ...opts });
+  if (res.status === 401) go(routes.login, { replace: true });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.detail || `请求失败（${res.status}）`);
   return body;
@@ -41,18 +44,22 @@ async function api(url, opts = {}) {
 
 // ------------------------------------------------------------------ routing
 
-function show(view, push = false) {
+function show(view, push = false, hash = "") {
   for (const v of document.querySelectorAll(".view")) v.hidden = v.id !== `view-${view}`;
   for (const t of document.querySelectorAll(".tab")) t.setAttribute("aria-selected", String(t.dataset.view === view));
-  document.title = `${{ mcp: "MCP 接入", sources: "数据源" }[view] || "本体项目"} · 本体工作台`;
-  if (push) history.pushState({ view }, "", view === "projects" ? "/" : `/${view}`);
+  document.title = `${{ mcp: "MCP 接入", sources: "数据源", settings: "平台设置" }[view] || "本体项目"} · 本体工作台`;
+  if (push) history.pushState({ view }, "", routes.view(view) + hash);
   if (view === "mcp") loadMcp();
   if (view === "sources") loadSources();
+  if (view === "settings") {
+    loadModelSettings();
+    loadMineruSettings().then(() => { if (location.hash === "#mineru-settings") $("#mineru-settings").scrollIntoView({ block: "start" }); });
+  }
 }
 for (const t of document.querySelectorAll(".tab")) {
   t.addEventListener("click", (e) => { e.preventDefault(); show(t.dataset.view, true); });
 }
-const viewFromPath = () => ({ "/mcp": "mcp", "/sources": "sources" })[location.pathname] || "projects";
+const viewFromPath = currentView;
 addEventListener("popstate", () => show(viewFromPath()));
 
 // ------------------------------------------------------------------ constellation
@@ -150,7 +157,7 @@ function renderProjects() {
 
 function card(p, i) {
   const st = p.stats || {};
-  const open = () => { location.href = `/p/${encodeURIComponent(p.id)}`; };
+  const open = () => go(routes.project(p.id));
   const menuBtn = el("button", { type: "button", class: "menu-btn", "aria-label": "更多操作", "aria-haspopup": "menu", "aria-expanded": "false",
     onclick: (e) => { e.stopPropagation(); toggleMenu(p, menuBtn); } },
     svg('<svg viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.3" fill="currentColor"/><circle cx="8" cy="8" r="1.3" fill="currentColor"/><circle cx="12.5" cy="8" r="1.3" fill="currentColor"/></svg>'));
@@ -158,7 +165,9 @@ function card(p, i) {
     st.pending > 0 && el("span", { class: "pill review" }, `${st.pending} 项待审核`),
     st.feed_errors > 0 && el("span", { class: "pill bad" }, `${st.feed_errors} 条采集出错`),
   );
-  const chips = [["节点", st.nodes], ["关系", st.links], ["数据流", st.feeds], ["新闻 7d", st.news_7d]];
+  const chips = (p.packs || []).includes("research")
+    ? [["节点", st.nodes], ["关系", st.links], ["文献", st.sources ?? 0], ["论文", st.manuscripts ?? 0]]
+    : [["节点", st.nodes], ["关系", st.links], ["数据流", st.feeds], ["新闻 7d", st.news_7d]];
   return el("article", {
     class: `card${p.status === "archived" ? " archived" : ""}`, style: `--i:${i}`, tabindex: "0", role: "link",
     "aria-label": `打开 ${p.name}`, onclick: open, onkeydown: (e) => { if (e.key === "Enter") open(); },
@@ -183,8 +192,10 @@ function toggleMenu(p, btn) {
   const act = (fn) => (e) => { e.stopPropagation(); closeMenu(); fn(); };
   const menu = el("div", { class: "menu", role: "menu", onclick: (e) => e.stopPropagation() },
     el("button", { type: "button", role: "menuitem", onclick: act(() => openDialog(p)) }, "编辑名称和描述"),
-    el("button", { type: "button", role: "menuitem", onclick: act(() => { location.href = `/api/projects/${encodeURIComponent(p.id)}/export`; }) }, "导出 JSON"),
-    el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
+    el("button", { type: "button", role: "menuitem", onclick: act(() => exportProject(p)) }, "导出 JSON"),
+    p.status === "active" && !(p.packs || []).includes("research") &&
+      el("button", { type: "button", role: "menuitem", onclick: act(() => addResearchTypes(p)) }, "加入研究类型"),
+    !cloudWorkspace && el("button", { type: "button", role: "menuitem", onclick: act(() => copyMcp(p)) }, "复制 MCP 配置"),
     el("button", { type: "button", role: "menuitem", class: p.status === "active" ? "danger" : "",
       onclick: act(() => setStatus(p, p.status === "active" ? "archived" : "active")) }, p.status === "active" ? "归档" : "恢复"),
   );
@@ -193,8 +204,23 @@ function toggleMenu(p, btn) {
   openMenu = { menu, btn };
 }
 
+async function exportProject(p) {
+  try {
+    if (await download(`/api/projects/${encodeURIComponent(p.id)}/export`, `${p.id}.json`)) toast("已导出");
+  } catch (e) { toast(e?.message || String(e), true); }
+}
+
+async function addResearchTypes(p) {
+  if (!await confirmAction(`给「${p.name}」加入研究类型（问题、假设、论断、观测、方法）？已有的节点和类型保留，同名类型会合并。`)) return;
+  try {
+    const r = await api(`/api/projects/${encodeURIComponent(p.id)}/packs/research`, { method: "POST" });
+    toast(`已加入 ${r.added.length} 个类型`);
+    loadProjects();
+  } catch (e) { toast(e.message, true); }
+}
+
 async function setStatus(p, status) {
-  if (status === "archived" && !confirm(`归档「${p.name}」？归档后停止采集，数据保留，可以随时恢复。`)) return;
+  if (status === "archived" && !await confirmAction(`归档「${p.name}」？归档后停止采集，数据保留，可以随时恢复。`)) return;
   try {
     await api(`/api/projects/${encodeURIComponent(p.id)}`, { method: "PATCH", body: JSON.stringify({ status }) });
     toast(status === "archived" ? "已归档" : "已恢复");
@@ -211,6 +237,8 @@ function openDialog(p = null) {
   $("#dialog-title").textContent = p ? "编辑本体项目" : "创建本体项目";
   $("#dialog-ok").textContent = p ? "保存" : "创建";
   $("#dialog-hint").hidden = !!p;
+  $("#f-pack-field").hidden = !!p;
+  $("#f-pack").value = "research";
   $("#f-name").value = p?.name || "";
   $("#f-desc").value = p?.description || "";
   dialog.showModal();
@@ -220,7 +248,8 @@ $("#create-btn").addEventListener("click", () => openDialog());
 $("#dialog-cancel").addEventListener("click", () => dialog.close());
 $("#project-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = JSON.stringify({ name: $("#f-name").value.trim(), description: $("#f-desc").value.trim() });
+  const fields = { name: $("#f-name").value.trim(), description: $("#f-desc").value.trim() };
+  const body = JSON.stringify(editing ? fields : { ...fields, pack: $("#f-pack").value });
   $("#dialog-ok").disabled = true;
   try {
     if (editing) {
@@ -232,10 +261,65 @@ $("#project-form").addEventListener("submit", async (e) => {
       const p = await api("/api/projects", { method: "POST", body });
       dialog.close();
       toast(`已创建「${p.name}」，正在打开工作台`);
-      setTimeout(() => { location.href = `/p/${encodeURIComponent(p.id)}`; }, 700);
+      setTimeout(() => go(routes.project(p.id)), 700);
     }
   } catch (err) { toast(err.message, true); }
   finally { $("#dialog-ok").disabled = false; }
+});
+
+// ------------------------------------------------------------------ big bang: merge projects into a new one
+
+const bbDialog = $("#bigbang-dialog");
+const bbChosen = () => [...$("#bb-list").querySelectorAll("input:checked")].map((c) => c.value);
+const bbError = (text) => { $("#bb-error").textContent = text || ""; $("#bb-error").hidden = !text; };
+function syncBigBang() {
+  const n = bbChosen().length;
+  $("#bb-ok").disabled = n < 2;
+  $("#bb-ok").textContent = n < 2 ? "至少选两个项目" : `合并 ${n} 个项目`;
+}
+function openBigBang() {
+  const active = projects.filter((p) => p.status === "active");
+  if (active.length < 2) { toast("至少要有两个进行中的项目才能合并", true); return; }
+  $("#bb-list").replaceChildren(...active.map((p) => {
+    const st = p.stats || {};
+    return el("label", { class: "bb-row" },
+      el("input", { type: "checkbox", value: p.id, onchange: syncBigBang }),
+      el("span", { class: "bb-name" }, p.name),
+      el("span", { class: "bb-meta" }, `${st.nodes ?? 0} 节点 · ${st.sources ?? 0} 文献`));
+  }));
+  $("#bb-name").value = "";
+  $("#bb-desc").value = "";
+  bbError("");
+  syncBigBang();
+  bbDialog.showModal();
+}
+$("#bigbang-btn").addEventListener("click", openBigBang);
+$("#bb-cancel").addEventListener("click", () => bbDialog.close());
+$("#bigbang-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const ok = $("#bb-ok");
+  ok.disabled = true;
+  ok.textContent = "合并中…";
+  bbError("");
+  try {
+    const res = await request("/api/projects/bigbang", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ projects: bbChosen(), name: $("#bb-name").value.trim(), description: $("#bb-desc").value.trim() }) });
+    if (res.status === 401) go(routes.login, { replace: true });
+    if (res.status === 404 || res.status === 405) {
+      throw new Error("正在运行的工作台还没有合并功能：请重启工作台服务后再试。");
+    }
+    const p = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(p.detail || `合并失败（${res.status}）`);
+    const m = p.merge;
+    const joined = m.nodes_joined + m.sources_joined;
+    bbDialog.close();
+    toast(`已合并为「${p.name}」：${p.stats.nodes} 个节点、${p.stats.sources} 篇文献、${m.notes} 条笔记`
+      + (joined ? `，其中 ${joined} 项重复的已合成一个` : ""));
+    setTimeout(() => go(routes.project(p.id)), 1400);
+  } catch (err) {
+    bbError(err.message);  // a toast would sit under the modal dialog's backdrop
+    syncBigBang();
+  }
 });
 
 // ------------------------------------------------------------------ import
@@ -362,6 +446,7 @@ async function loadMcp() {
   sel.value = keep || new URLSearchParams(location.search).get("project") || "";
   showMcpConfig();
   renderNeeds();
+  loadExtMcp();
   const byName = new Map(mcpInfo.tools.map((t) => [t.name, t]));
   const seen = new Set(GROUPS.flatMap(([, ns]) => ns));
   const groups = [...GROUPS, ["其他", mcpInfo.tools.map((t) => t.name).filter((n) => !seen.has(n))]];
@@ -397,21 +482,167 @@ async function copyMcp(p) {
   } catch { toast("复制失败，可在「MCP 接入」页手动复制", true); }
 }
 
+// ------------------------------------------------------------------ external MCP servers
+
+// Servers the user connected for the agent and the collector. Header values stay on this machine; the page only
+// ever gets their last 4 characters, and sends `keep` for a header it leaves alone.
+async function loadExtMcp() {
+  let data;
+  try { data = await api("/api/mcp/servers"); }
+  catch { $("#ext-mcp").hidden = true; return; }  // a cloud workspace, or not this machine
+  $("#ext-mcp").hidden = false;
+  $("#ext-mcp-file").textContent = data.file;
+  $("#ext-mcp-count").textContent = String(data.servers.length);
+  $("#ext-mcp-list").replaceChildren(...(data.servers.length ? data.servers.map(extMcpCard)
+    : [el("p", { class: "lede" }, "还没有接入外部 MCP 服务。点「添加 MCP 服务」，填上名称、URL 和需要的请求头（例如 Authorization 或 X-Api-Key）。")]));
+}
+
+function savedDefinition(s) {
+  return { name: s.name, transport: s.transport, url: s.url, enabled: s.enabled,
+           headers: s.headers.map((h) => ({ key: h.key, keep: true })) };
+}
+
+function showMcpTest(box, r) {
+  const head = el("p", { class: `test-result ${r.ok ? "ok" : "bad"}` },
+    r.ok ? `连接正常 · ${r.tools.length} 个工具 · ${r.seconds}s` : `连接失败 · ${r.message}`);
+  box.replaceChildren(...[head, r.ok && r.tools.length > 0 && el("ul", {}, ...r.tools.map((t) =>
+    el("li", {}, el("span", {}, t.name), el("span", { class: "tool-desc", title: t.description }, t.description))))].filter(Boolean));
+  box.hidden = false;
+}
+
+async function testMcp(body, box, btn) {
+  btn.disabled = true; const label = btn.textContent; btn.textContent = "连接中…";
+  try { showMcpTest(box, await api("/api/mcp/servers/test", { method: "POST", body: JSON.stringify(body) })); }
+  catch (e) { showMcpTest(box, { ok: false, message: e.message }); }
+  btn.disabled = false; btn.textContent = label;
+}
+
+function extMcpCard(s, i) {
+  const box = el("div", { class: "source-test", hidden: true });
+  const test = el("button", { type: "button", class: "btn sm", onclick: () => testMcp({ name: s.name, definition: savedDefinition(s) }, box, test) }, "测试连接");
+  const remove = async () => {
+    const used = s.used_by.length ? `\n数据源 ${s.used_by.map((t) => `「${t}」`).join("、")} 用到了它，删除后这些数据源会采集失败。` : "";
+    if (!await confirmAction(`删除 MCP 服务「${s.name}」？保存的请求头也会一并删除。${used}`)) return;
+    try {
+      await api(`/api/mcp/servers/${encodeURIComponent(s.name)}`, { method: "DELETE" });
+      toast(`已删除「${s.name}」`);
+      loadExtMcp();
+    } catch (e) { toast(e.message, true); }
+  };
+  return el("article", { class: "src-card", style: `--i:${i}` },
+    el("div", { class: "src-head" },
+      el("h3", {}, s.name),
+      el("span", { class: `src-state ${s.enabled ? "ok" : "idle"}` }, s.enabled ? "已启用" : "已停用")),
+    el("div", { class: "src-actions" }, el("span", { class: "src-kind" }, "Streamable HTTP")),
+    el("p", { class: "src-url" }, s.url),
+    s.headers.length > 0 && el("ul", { class: "src-list" }, ...s.headers.map((h) => el("li", {},
+      el("span", {}, h.key), el("code", {}, h.hint)))),
+    el("p", { class: "src-note" }, s.enabled ? `agent 里的工具名：mcp__${s.name}__…` : "停用后 agent 看不到它的工具，数据源也不会调用它。"),
+    s.used_by.length > 0 && el("p", { class: "src-note" }, "数据源：", s.used_by.join("、")),
+    el("div", { class: "src-foot" },
+      el("span", { class: "src-actions" },
+        el("button", { type: "button", class: "link", onclick: () => openMcpDialog(s) }, "编辑"),
+        el("button", { type: "button", class: "link danger", onclick: remove }, "删除")),
+      test),
+    box,
+  );
+}
+
+const mcpDialog = $("#mcp-dialog");
+const mcpForm = $("#mcp-form");
+const mcpField = (name) => mcpForm.elements.namedItem(name);
+let editingMcp = null;
+
+function headerRow(h = null) {
+  const key = el("input", { class: "h-key", value: h?.key || "", placeholder: "名称，例如 Authorization", maxlength: "100",
+    autocomplete: "off", spellcheck: "false", "aria-label": "请求头名称" });
+  const value = el("input", { class: "h-value", type: "password", maxlength: "4000", autocomplete: "off", spellcheck: "false",
+    placeholder: h ? `已保存 ${h.hint}，留空则不变` : "值，例如 Bearer …", "aria-label": "请求头的值" });
+  const row = el("div", { class: "header-row" }, key, value,
+    el("button", { type: "button", class: "link danger", "aria-label": "删除这个请求头", onclick: () => row.remove() }, "删除"));
+  row.dataset.saved = h ? h.key : "";
+  return row;
+}
+
+function mcpDefinition() {
+  const headers = [...$("#mcp-headers").children].map((row) => {
+    const key = row.querySelector(".h-key").value.trim();
+    const value = row.querySelector(".h-value").value;
+    return { key, value, keep: !value && !!row.dataset.saved && row.dataset.saved.toLowerCase() === key.toLowerCase() };
+  });
+  return { name: mcpField("name").value.trim(), transport: mcpField("transport").value, url: mcpField("url").value.trim(),
+           enabled: mcpField("enabled").checked, headers };
+}
+
+function openMcpDialog(s = null) {
+  editingMcp = s;
+  mcpForm.reset();
+  $("#mcp-dialog-title").textContent = s ? `编辑「${s.name}」` : "添加 MCP 服务";
+  mcpField("name").value = s?.name || "";
+  mcpField("name").disabled = !!s;
+  mcpField("transport").value = s?.transport || "streamable_http";
+  mcpField("url").value = s?.url || "";
+  mcpField("enabled").checked = s ? s.enabled : true;
+  $("#mcp-headers").replaceChildren(...(s?.headers.length ? s.headers.map(headerRow) : [headerRow()]));
+  $("#mcp-test-box").hidden = true;
+  mcpDialog.showModal();
+}
+
+$("#add-mcp-btn").addEventListener("click", () => openMcpDialog());
+$("#mcp-add-header").addEventListener("click", () => {
+  const row = headerRow();
+  $("#mcp-headers").append(row);
+  row.querySelector(".h-key").focus();
+});
+$("#mcp-cancel").addEventListener("click", () => mcpDialog.close());
+$("#mcp-test-btn").addEventListener("click", () => {
+  if (!mcpField("url").checkValidity()) { mcpField("url").reportValidity(); return; }
+  testMcp({ name: editingMcp?.name, definition: mcpDefinition() }, $("#mcp-test-box"), $("#mcp-test-btn"));
+});
+mcpForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#mcp-save");
+  btn.disabled = true;
+  try {
+    const d = mcpDefinition();
+    await api(editingMcp ? `/api/mcp/servers/${encodeURIComponent(editingMcp.name)}` : "/api/mcp/servers",
+      { method: editingMcp ? "PUT" : "POST", body: JSON.stringify(d) });
+    mcpDialog.close();
+    toast(editingMcp ? `已保存「${d.name || editingMcp.name}」` : `已添加「${d.name}」，agent 下次对话时就能用它的工具`);
+    loadExtMcp();
+  } catch (err) { showMcpTest($("#mcp-test-box"), { ok: false, message: err.message }); }
+  btn.disabled = false;
+});
+
 // ------------------------------------------------------------------ data sources
 
 const CATEGORY_ORDER = ["a-share", "crypto", "onchain", "macro", "news", "social", "internal"];
 
 async function loadSources() {
   try {
-    const { providers, categories } = await api("/api/sources");
+    const { providers, categories, custom = [], can_manage: canManage } = await api("/api/sources");
+    $("#add-source-btn").hidden = !canManage;
     const order = [...CATEGORY_ORDER, ...Object.keys(categories).filter((c) => !CATEGORY_ORDER.includes(c))];  // new ones still show
     const groups = order.map((c) => [c, providers.filter((p) => p.category === c)]).filter(([, ps]) => ps.length);
-    $("#source-groups").replaceChildren(...groups.map(([c, ps]) => el("section", {},
+    const mine = canManage && el("section", {},
+      el("h2", { class: "group-title" }, "我添加的", el("small", {}, String(custom.length))),
+      custom.length
+        ? el("div", { class: "grid sources" }, ...custom.map(customCard))
+        : el("p", { class: "lede" }, "还没有自己添加的数据源。点右上角「添加数据源」，接入 RSS 新闻或任意返回 JSON / CSV 的数据接口。"));
+    $("#source-groups").replaceChildren(...[mine, ...groups.map(([c, ps]) => el("section", {},
       el("h2", { class: "group-title" }, categories[c] || c, el("small", {}, String(ps.length))),
-      el("div", { class: "grid sources" }, ...ps.map(sourceCard)))));
+      el("div", { class: "grid sources" }, ...ps.map(sourceCard))))].filter(Boolean));
   } catch (e) {
     $("#source-groups").replaceChildren(el("p", { class: "lede" }, `数据源读取失败：${e.message}`));
   }
+}
+
+// A provider whose connection is set on another page (MinerU: 平台设置) links there instead of taking a key here.
+function settingsRow(p) {
+  return el("div", { class: "src-key" }, el("div", { class: "key-line" },
+    p.key_hint ? el("span", {}, "密钥 ", el("code", {}, p.key_hint)) : el("span", {}, p.configured ? "无需密钥" : "未配置密钥"),
+    el("span", { class: "key-actions" },
+      el("button", { type: "button", class: "link", onclick: () => show(p.settings_view, true, `#${p.id}-settings`) }, "在平台设置中配置"))));
 }
 
 // The key is written to .env on this machine and takes effect at once; the page only gets its last 4 characters.
@@ -441,15 +672,15 @@ function keyRow(p) {
     el("span", {}, "API Key ", el("code", {}, p.key_hint)),
     el("span", { class: "key-actions" },
       el("button", { type: "button", class: "link", onclick: () => row.replaceChildren(...editor()) }, "更换"),
-      el("button", { type: "button", class: "link danger", onclick: () => { if (confirm(`清除 ${p.name} 的 API Key？`)) save(""); } }, "清除"))), msg];
+      el("button", { type: "button", class: "link danger", onclick: async () => { if (await confirmAction(`清除 ${p.name} 的 API Key？`)) save(""); } }, "清除"))), msg];
   row.replaceChildren(...(p.configured ? view() : editor()));
   return row;
 }
 
 function sourceCard(p, i) {
   const h = p.health;
-  const state = !p.configured ? ["warn", `需要 ${p.auth_env}`] : h.errors ? ["bad", `${h.errors} 条出错`]
-    : h.series ? ["ok", "运行中"] : ["idle", p.auth_env ? "已配置 · 未使用" : "可用 · 未使用"];
+  const state = !p.configured ? ["warn", p.settings_view ? "需要在平台设置中配置" : `需要 ${p.auth_env}`] : h.errors ? ["bad", `${h.errors} 条出错`]
+    : h.series ? ["ok", "运行中"] : ["idle", p.auth_env || p.settings_view ? "已配置 · 未使用" : "可用 · 未使用"];
   const result = el("p", { class: "test-result", hidden: true });
   const btn = el("button", { type: "button", class: "btn sm", onclick: async () => {
     btn.disabled = true; btn.textContent = "测试中…"; result.hidden = true;
@@ -471,7 +702,7 @@ function sourceCard(p, i) {
       el("span", {}, "最近成功 ", el("b", {}, h.last_ok ? ago(h.last_ok) : "—")),
       h.projects.length > 0 && el("span", {}, "项目 ", el("b", {}, h.projects.join("、")))),
     h.last_error && el("p", { class: "src-error" }, `${h.last_error.series}：${h.last_error.error}`),
-    p.auth_env && keyRow(p),
+    p.settings_view && !cloudWorkspace ? settingsRow(p) : p.auth_env && !cloudWorkspace && keyRow(p),
     p.sources.length > 0 && el("ul", { class: "src-list" }, ...p.sources.map((s) => el("li", {},
       el("span", {}, s.title), el("code", {}, s.source)))),
     el("div", { class: "src-foot" },
@@ -481,9 +712,398 @@ function sourceCard(p, i) {
   );
 }
 
+// ------------------------------------------------------------------ custom data sources
+
+const KIND_NAMES = { json: "JSON 接口", csv: "CSV 文件", rss: "RSS 新闻", mcp: "MCP 工具" };
+const FREQ_NAMES = { "5m": "5 分钟", "1h": "1 小时", "4h": "4 小时", "8h": "8 小时", "1d": "1 天", "1w": "1 周", "1mo": "1 月", "1q": "1 季度" };
+
+function customCard(c, i) {
+  const h = c.health;
+  const state = h.errors ? ["bad", `${h.errors} 条出错`] : h.series ? ["ok", "运行中"] : ["idle", "可用 · 未使用"];
+  const cfg = c.config || {};
+  const how = c.kind === "rss" ? `语言 ${cfg.lang === "en" ? "英文" : "中文"}`
+    : [c.kind !== "csv" && `路径 ${cfg.path || "（根）"}`, `时间 ${cfg.time || "采集时刻"}`, `数值 ${cfg.value || "返回值本身"}`,
+       FREQ_NAMES[cfg.frequency] || cfg.frequency, `每 ${cfg.poll_minutes} 分钟采集`, cfg.unit && `单位 ${cfg.unit}`].filter(Boolean).join(" · ");
+  const where = c.kind === "mcp"
+    ? `${cfg.server} → ${cfg.tool}${Object.keys(cfg.arguments || {}).length ? ` ${JSON.stringify(cfg.arguments)}` : ""}` : c.url;
+  const remove = async () => {
+    const kept = h.series ? `\n已有 ${h.series} 条数据流（${h.projects.join("、")}）会保留已采集的数据，但不再更新。` : "";
+    if (!await confirmAction(`删除数据源「${c.title}」？${kept}`)) return;
+    try {
+      await api(`/api/sources/custom/${encodeURIComponent(c.name)}`, { method: "DELETE" });
+      toast(`已删除「${c.title}」`);
+      loadSources();
+    } catch (e) { toast(e.message, true); }
+  };
+  return el("article", { class: "src-card", style: `--i:${i}` },
+    el("div", { class: "src-head" },
+      el("h3", {}, c.title),
+      el("span", { class: `src-state ${state[0]}` }, state[1])),
+    el("div", { class: "src-actions" }, el("span", { class: "src-kind" }, KIND_NAMES[c.kind] || c.kind), el("code", { class: "src-url" }, c.name)),
+    el("p", { class: "src-url" }, where),
+    el("p", { class: "src-note" }, how),
+    c.params.length > 0 && el("p", { class: "src-note" }, "绑定时填写：", ...c.params.flatMap((p, k) => [k ? "、" : "", el("code", {}, p)])),
+    el("div", { class: "src-stats" },
+      el("span", {}, c.kind === "rss" ? "项目 " : "数据流 ", el("b", {}, String(h.series))),
+      h.stale > 0 && el("span", {}, "陈旧 ", el("b", {}, String(h.stale))),
+      el("span", {}, "最近成功 ", el("b", {}, h.last_ok ? ago(h.last_ok) : "—"))),
+    h.last_error && el("p", { class: "src-error" }, `${h.last_error.series}：${h.last_error.error}`),
+    el("div", { class: "src-foot" },
+      el("span", { class: "src-actions" },
+        el("button", { type: "button", class: "link", onclick: () => openSourceDialog(c) }, "编辑"),
+        el("button", { type: "button", class: "link danger", onclick: remove }, "删除")),
+      el("span")),
+  );
+}
+
+const sourceDialog = $("#source-dialog");
+const sourceForm = $("#source-form");
+const field = (name) => sourceForm.elements.namedItem(name);
+let editingSource = null;  // the custom source being edited, or null when adding
+
+function urlParams(url) {
+  return [...new Set([...url.matchAll(/\{([a-z][a-z0-9_]*)\}/g)].map((m) => m[1]))];
+}
+
+function syncSourceForm() {
+  const kind = field("kind").value;
+  const series = kind !== "rss";
+  const mcp = kind === "mcp";
+  const params = mcp ? urlParams(field("arguments").value) : urlParams(field("url").value);
+  const show = { rss: !series, series, mcp, url: !mcp, "http-series": kind === "json" || kind === "csv",
+                 path: kind !== "csv", params: params.length > 0 };
+  for (const node of sourceForm.querySelectorAll("[data-for]")) node.hidden = !show[node.dataset.for];
+  sourceForm.querySelector('[data-label="time"]').textContent = kind === "csv" ? "时间列" : "时间字段";
+  sourceForm.querySelector('[data-label="value"]').textContent = kind === "csv" ? "数值列" : "数值字段";
+  field("time").placeholder = kind === "csv" ? "例如 date" : "例如 date；留空则记录采集时刻的数值";
+  field("value").placeholder = mcp ? "例如 price；工具只返回一个数时留空" : "例如 close";
+  field("test_params").placeholder = `例如 ${params.map((p) => `${p}=…`).join(" ") || "symbol=600519"}`;
+  field("url").required = !mcp;
+  field("time").required = kind === "csv";
+  field("value").required = kind === "json" || kind === "csv";
+  field("server").required = field("tool").required = mcp;
+}
+
+// The MCP servers connected on the MCP 接入 page, for the MCP 工具 kind; and the tools of the one picked.
+let sourceTools = [];
+async function fillServerChoices(chosen) {
+  const sel = field("server");
+  let servers = [];
+  try { servers = (await api("/api/mcp/servers")).servers; } catch { /* a cloud workspace has none */ }
+  sel.replaceChildren(el("option", { value: "" }, servers.length ? "选择一个服务" : "还没有接入 MCP 服务"),
+    ...servers.map((s) => el("option", { value: s.name }, `${s.name}${s.enabled ? "" : "（已停用）"}`)));
+  if (chosen && !servers.some((s) => s.name === chosen)) sel.append(el("option", { value: chosen }, `${chosen}（已删除）`));
+  sel.value = chosen || "";
+}
+async function loadSourceTools() {
+  const name = field("server").value;
+  const help = $("#mcp-tool-help");
+  sourceTools = [];
+  $("#mcp-tool-names").replaceChildren();
+  help.hidden = !name;
+  if (!name) return;
+  help.textContent = "正在读取工具列表…";
+  try {
+    sourceTools = (await api(`/api/mcp/servers/${encodeURIComponent(name)}/tools`)).tools;
+    $("#mcp-tool-names").replaceChildren(...sourceTools.map((t) => el("option", { value: t.name }, t.description.slice(0, 80))));
+    showToolHelp();
+  } catch (e) { help.textContent = e.message; }
+}
+function showToolHelp() {
+  const help = $("#mcp-tool-help");
+  const t = sourceTools.find((x) => x.name === field("tool").value.trim());
+  if (!t) { help.textContent = sourceTools.length ? `这个服务有 ${sourceTools.length} 个工具，在「工具」里选一个。` : ""; return; }
+  const props = t.input_schema?.properties || {};
+  const need = new Set(t.input_schema?.required || []);
+  const args = Object.keys(props).map((k) => `${k}${need.has(k) ? "（必填）" : ""}`);
+  const about = t.description.length > 240 ? `${t.description.slice(0, 240)}…` : t.description;
+  help.textContent = `${about}${args.length ? ` 参数：${args.join("、")}` : " 不需要参数。"}`;
+  if (!field("arguments").value.trim() && need.size) {  // a starting point: the required arguments, to be filled in
+    field("arguments").value = JSON.stringify(Object.fromEntries([...need].map((k) => [k, ""])));
+    syncSourceForm();
+  }
+}
+
+function openSourceDialog(c = null) {
+  editingSource = c;
+  sourceForm.reset();
+  const cfg = c?.config || {};
+  $("#source-dialog-title").textContent = c ? `编辑「${c.title}」` : "添加数据源";
+  field("kind").value = c?.kind || "json";
+  field("kind").disabled = field("name").disabled = !!c;
+  for (const n of ["name", "title"]) field(n).value = c?.[n] || "";
+  field("url").value = c && c.kind !== "mcp" ? c.url : "";
+  for (const n of ["path", "time", "value", "unit", "tool"]) field(n).value = cfg[n] || "";
+  field("arguments").value = cfg.arguments && Object.keys(cfg.arguments).length ? JSON.stringify(cfg.arguments) : "";
+  field("lang").value = cfg.lang || "zh";
+  field("time_format").value = cfg.time_format || "auto";
+  field("frequency").value = cfg.frequency || "1d";
+  field("poll_minutes").value = cfg.poll_minutes || 60;
+  field("backfill_days").value = cfg.backfill_days || 365;
+  sourceForm.querySelector(".source-test").hidden = true;
+  syncSourceForm();
+  sourceDialog.showModal();
+  fillServerChoices(cfg.server).then(() => { if (field("kind").value === "mcp") loadSourceTools(); });
+}
+
+function sourceDefinition() {
+  const kind = field("kind").value;
+  const v = (n) => field(n).value.trim();
+  const config = kind === "rss" ? { lang: v("lang") } : {
+    path: v("path"), time: v("time"), value: v("value"), time_format: v("time_format"), frequency: v("frequency"),
+    unit: v("unit"), poll_minutes: Number(v("poll_minutes")) || 60, backfill_days: Number(v("backfill_days")) || 365,
+    ...(kind === "mcp" ? { server: v("server"), tool: v("tool"), arguments: v("arguments") } : {}),
+  };
+  return { kind, name: v("name"), title: v("title"), url: kind === "mcp" ? "" : v("url"), config };
+}
+
+function showTest(r) {
+  const box = sourceForm.querySelector(".source-test");
+  const head = el("p", { class: `test-result ${r.ok ? "ok" : "bad"}` });
+  if (!r.ok) head.textContent = `读取失败 · ${r.message}`;
+  else if (r.kind === "rss") head.textContent = `读到 ${r.count} 篇文章 · ${r.seconds}s`;
+  else head.textContent = `读到 ${r.count} 个数据点 · ${FREQ_NAMES[r.frequency] || r.frequency} · ${r.seconds}s`;
+  const rows = !r.ok ? [] : r.kind === "rss"
+    ? r.samples.map((x) => el("li", {}, el("span", {}, x.title), el("span", {}, x.published_at.slice(0, 10))))
+    : r.samples.map((x) => el("li", {}, el("span", {}, x.ts.replace("T", " ").replace(/:00\+00:00$|\+00:00$/, "")),
+        el("span", {}, Number(x.value).toLocaleString("zh-CN", { maximumFractionDigits: 6 }))));
+  box.replaceChildren(...[head, rows.length > 0 && el("ul", {}, ...rows)].filter(Boolean));
+  box.hidden = false;
+}
+
+field("kind").addEventListener("change", () => {
+  syncSourceForm();
+  if (field("kind").value === "mcp" && !sourceTools.length) loadSourceTools();
+});
+field("url").addEventListener("input", syncSourceForm);
+field("arguments").addEventListener("input", syncSourceForm);
+field("server").addEventListener("change", () => { field("tool").value = ""; loadSourceTools(); });
+field("tool").addEventListener("change", showToolHelp);
+$("#add-source-btn").addEventListener("click", () => openSourceDialog());
+$("#source-cancel").addEventListener("click", () => sourceDialog.close());
+$("#source-test-btn").addEventListener("click", async () => {
+  const btn = $("#source-test-btn");
+  for (const n of field("kind").value === "mcp" ? ["server", "tool"] : ["url"]) {
+    if (!field(n).checkValidity()) { field(n).reportValidity(); return; }
+  }
+  const params = Object.fromEntries(field("test_params").value.split(/[,，\s]+/).filter((x) => x.includes("="))
+    .map((x) => x.split("=").map((y) => y.trim())));
+  btn.disabled = true; btn.textContent = "测试中…";
+  try {
+    showTest(await api("/api/sources/custom/test", { method: "POST", body: JSON.stringify({ definition: sourceDefinition(), params }) }));
+  } catch (e) { showTest({ ok: false, message: e.message }); }
+  btn.disabled = false; btn.textContent = "测试";
+});
+sourceForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const btn = $("#source-save");
+  btn.disabled = true;
+  try {
+    const d = sourceDefinition();
+    await api(editingSource ? `/api/sources/custom/${encodeURIComponent(editingSource.name)}` : "/api/sources/custom",
+      { method: editingSource ? "PUT" : "POST", body: JSON.stringify(d) });
+    sourceDialog.close();
+    toast(editingSource ? `已保存「${d.title}」` : `已添加「${d.title}」`);
+    loadSources();
+  } catch (err) { showTest({ ok: false, message: err.message }); }
+  btn.disabled = false;
+});
+
+// ------------------------------------------------------------------ model settings
+
+const modelForm = $("#model-settings");
+const modelSave = modelForm.querySelector('button[type="submit"]');
+const modelTest = $("#test-model-settings");
+const modelResult = $("#model-settings-result");
+let savedModelSettings = null;
+
+function modelMessage(text, error = false) {
+  modelResult.hidden = false;
+  modelResult.textContent = text;
+  modelResult.classList.toggle("bad", error);
+}
+
+function renderModelFields() {
+  const mode = modelForm.elements.mode.value;
+  const fields = modelForm.elements;
+  const route = savedModelSettings.local_routes.find((entry) => entry.id === mode);
+  const custom = mode === "custom";
+  const editing = mode !== "environment";
+  $("#model-url-field").hidden = $("#model-auth-field").hidden = !custom;
+  $("#model-name-field").hidden = $("#model-key-field").hidden = !editing;
+  fields.base_url.disabled = fields.auth_kind.disabled = !custom;
+  fields.base_url.required = custom;
+  fields.model.required = editing;
+  fields.api_key.placeholder = savedModelSettings.key_configured && savedModelSettings.mode === mode
+    ? "已保存，留空则保留" : route ? "可选，留空使用路由默认凭据" : "输入 API Key";
+  $("#model-route-hint").textContent = route
+    ? `${route.label} · ${route.base_url} · ${route.reachable ? "端口可连接" : "端口未连接"}`
+    : custom
+      ? savedModelSettings.cloud
+        ? `支持 Anthropic Messages。可用的 HTTPS 域名：${savedModelSettings.allowed_hosts.join("、") || "无"}。本机路由请在本地工作台使用。`
+        : "填写支持 Anthropic Messages 的 Base URL。"
+      : savedModelSettings.default_configured ? "当前运行环境已配置模型凭据。" : "当前运行环境未配置模型凭据。";
+  $("#local-model-options").replaceChildren();
+  if (route?.reachable) {
+    api(`/api/settings/model/local/${mode}`).then((catalog) => {
+      if (modelForm.elements.mode.value !== mode) return;
+      $("#local-model-options").replaceChildren(...catalog.models.map((entry) =>
+        el("option", { value: entry.id, label: entry.name })));
+    }).catch(() => {});
+  }
+}
+
+function fillModelSettings(data) {
+  savedModelSettings = data;
+  for (const option of modelForm.elements.mode.options) {
+    if (["magpie", "ccswitch"].includes(option.value)) option.hidden = data.cloud;
+  }
+  const fields = modelForm.elements;
+  fields.mode.disabled = false;
+  fields.mode.value = data.mode;
+  fields.model.value = data.model;
+  fields.base_url.value = data.base_url;
+  fields.auth_kind.value = data.auth_kind;
+  fields.api_key.value = "";
+  renderModelFields();
+}
+
+async function loadModelSettings() {
+  modelSave.disabled = modelTest.disabled = true;
+  modelForm.elements.mode.disabled = true;
+  modelResult.hidden = true;
+  try {
+    fillModelSettings(await api("/api/settings/model"));
+    modelSave.disabled = modelTest.disabled = false;
+  } catch (error) { modelMessage(error.message, true); }
+}
+
+modelForm.elements.mode.addEventListener("change", () => {
+  const mode = modelForm.elements.mode.value;
+  modelForm.elements.api_key.value = "";
+  modelForm.elements.model.value = mode === savedModelSettings.mode ? savedModelSettings.model
+    : mode === "ccswitch" ? "claude-sonnet-5" : savedModelSettings.model;
+  renderModelFields();
+});
+
+modelForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  modelSave.disabled = modelTest.disabled = true;
+  try {
+    const data = Object.fromEntries(new FormData(modelForm));
+    fillModelSettings(await api("/api/settings/model", { method: "PUT", body: JSON.stringify(data) }));
+    modelMessage("模型设置已保存。");
+  } catch (error) { modelMessage(error.message, true); }
+  finally { modelSave.disabled = modelTest.disabled = false; }
+});
+
+modelTest.addEventListener("click", async () => {
+  modelSave.disabled = modelTest.disabled = true;
+  try {
+    const result = await api("/api/settings/model/test", { method: "POST" });
+    modelMessage(`模型 ${result.model} 已成功响应。`);
+  } catch (error) { modelMessage(error.message, true); }
+  finally { modelSave.disabled = modelTest.disabled = false; }
+});
+
+// ------------------------------------------------------------------ MinerU settings
+
+const mineruForm = $("#mineru-settings");
+const mineruSave = mineruForm.querySelector('button[type="submit"]');
+const mineruTest = $("#test-mineru-settings");
+const mineruClear = $("#clear-mineru-secret");
+const mineruResult = $("#mineru-settings-result");
+
+function mineruMessage(text, error = false) {
+  mineruResult.hidden = false;
+  mineruResult.textContent = text;
+  mineruResult.classList.toggle("bad", error);
+}
+
+function fillMineru(d) {
+  const f = mineruForm.elements;
+  const locked = !d.editable;
+  for (const name of ["url", "key_id", "secret"]) f[name].disabled = locked;
+  mineruSave.disabled = mineruTest.disabled = locked;
+  f.url.value = d.editable ? d.saved_url : d.url;
+  f.key_id.value = d.key_id || "";
+  f.secret.value = "";
+  f.secret.placeholder = d.secret_configured ? `已保存 ${d.secret_hint}，留空则保留` : "粘贴 Secret Key";
+  mineruClear.hidden = !d.secret_configured;
+  $("#mineru-hint").textContent = !d.editable
+    ? "云端工作台的 MinerU 由运营者在部署环境中配置。"
+    : d.key_source === "settings" ? `已配置，精读会使用这里保存的密钥（服务：${d.host}）。`
+      : d.key_source === "environment" ? `正在使用 .env 里的 MINERU_API_KEY（${d.env_hint}）；在这里保存后以这里为准。`
+        : d.hosted ? "还没有密钥：保存 Key ID 和 Secret Key 后就能开始精读。" : `自建服务 ${d.host} 不需要密钥。`;
+}
+
+async function loadMineruSettings() {
+  mineruSave.disabled = mineruTest.disabled = true;
+  mineruResult.hidden = true;
+  try { fillMineru(await api("/api/settings/mineru")); } catch (error) { mineruMessage(error.message, true); }
+}
+
+async function saveMineru(body, done) {
+  mineruSave.disabled = mineruTest.disabled = mineruClear.disabled = true;
+  try {
+    fillMineru(await api("/api/settings/mineru", { method: "PUT", body: JSON.stringify(body) }));
+    mineruMessage(done);
+  } catch (error) { mineruMessage(error.message, true); }
+  finally { mineruSave.disabled = mineruTest.disabled = mineruClear.disabled = false; }
+}
+
+mineruForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const f = mineruForm.elements;
+  saveMineru({ url: f.url.value, key_id: f.key_id.value, secret: f.secret.value }, "MinerU 设置已保存。");
+});
+
+mineruClear.addEventListener("click", async () => {
+  if (!(await confirmAction("清除保存的 MinerU Secret Key？"))) return;
+  const f = mineruForm.elements;
+  saveMineru({ url: f.url.value, key_id: f.key_id.value, secret: "", clear_secret: true }, "已清除 Secret Key。");
+});
+
+mineruTest.addEventListener("click", async () => {
+  mineruSave.disabled = mineruTest.disabled = true;
+  try {
+    mineruMessage((await api("/api/settings/mineru/test", { method: "POST" })).message);
+  } catch (error) { mineruMessage(error.message, true); }
+  finally { mineruSave.disabled = mineruTest.disabled = false; }
+});
+
 // ------------------------------------------------------------------ start
 
-show(viewFromPath());
-loadProjects();
+$("#sign-out").addEventListener("click", async () => {
+  const button = $("#sign-out");
+  button.disabled = true;
+  try {
+    const response = await request("/auth/logout", { method: "POST" });
+    if (!response.ok) throw new Error();
+    go(routes.login, { replace: true });
+  } catch {
+    button.disabled = false;
+    toast("退出失败，请重试。", true);
+  }
+});
+
+async function start() {
+  const session = await request("/auth/session").catch(() => null);
+  if (session?.status === 401) {
+    go(routes.login, { replace: true });
+    return;
+  }
+  cloudWorkspace = session?.ok === true;
+  if (cloudWorkspace) {
+    $("#sign-out").hidden = false;
+    $('.tab[data-view="mcp"]').hidden = true;
+    $("#sources-description").textContent = "这里显示你正在进行的项目所使用的数据源。云端数据源凭据由工作台运营者管理。";
+  }
+  show(cloudWorkspace && viewFromPath() === "mcp" ? "projects" : viewFromPath());
+  loadProjects();
+}
+
+start();
+addEventListener("pageshow", (event) => { if (event.persisted && cloudWorkspace) location.reload(); });
 setInterval(() => { if (!document.hidden && !$("#view-projects").hidden && !openMenu && !dialog.open) loadProjects(); }, 30000);
 if (REDUCED) document.documentElement.classList.add("reduced");

@@ -1,8 +1,17 @@
-# 本体类型注册表（种子）。
+# 类型包「市场监测」：BTC 与宏观市场的数字孪生，早期项目都用它。新项目默认用 research.yaml。
 # 这里是"人设计的 schema"：agent 只能通过 propose_type 提议新类型，由人确认后生效。
 # layer: world = 市场的数字孪生；company = 组织自身的数字孪生。
 # 属性类型: string | text | number | integer | boolean | datetime | enum | string_list
 # 关系的 from / to 列出允许的对象类型，"*" 表示任意类型。
+
+guidance: |
+  This is a market-monitoring project (assets, narratives, events, macro indicators, signals).
+  - search_news returns what the news desk has read, already mapped to nodes. Use it for "what is happening" questions.
+  - For what people say on X (Twitter), call search_x; it searches live and returns real post URLs. Never describe
+    posts you did not get from it.
+  - A-share research: a_share_search resolves names to thscodes (600519.SH, 886042.TI); model listed companies as
+    Asset with asset_class equity and the thscode as symbol, indices and sectors as asset_class index. Bind any
+    relevant series only if the user asks. a_share_quote / a_share_financials / a_share_index_members answer questions.
 
 object_types:
   Asset:

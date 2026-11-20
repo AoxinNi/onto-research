@@ -1,9 +1,16 @@
 /* 本体工作台：三维星图 + 对话 + 审核。图数据来自服务端快照，前端只做增量合并、布局和视觉状态。 */
 import { ForceGraph3D, THREE, CSS2DRenderer, CSS2DObject, UnrealBloomPass } from "/static/vendor/graph3d.js";
-import { TYPES, LINKS, PROVENANCE, typeOf } from "/static/vocab.js";
+import { TYPES, LINKS, LAYERS, PROVENANCE, NEEDS_GROUNDING, STANCES, lowerLayer, typeOf } from "/static/vocab.js";
+import { currentProject, download, go, request, routes, socket } from "/static/net.js";
+import { initLibrary } from "/static/library.js";
+import { initWriting } from "/static/writing.js";
+import { renderMarkdown } from "/static/markdown.js";
+import { createShell } from "/static/shell.js";
+import { createProblems } from "/static/problems.js";
 
-// Each workbench page is served at /p/<id>.
-const PROJECT = decodeURIComponent((location.pathname.match(/^\/p\/([^/]+)/) || [])[1]);
+// Each workbench page is served at /p/<id> (the desktop app: workspace.html?project=<id>).
+const PROJECT = currentProject();
+if (!PROJECT) go(routes.projects, { replace: true });
 const q = (url) => `${url}${url.includes("?") ? "&" : "?"}project=${encodeURIComponent(PROJECT)}`;
 
 // ------------------------------------------------------------------ vocabulary
@@ -242,11 +249,11 @@ G.postProcessingComposer().addPass(bloom);
 
 G.d3Force("charge").strength((n) => -120 - 40 * Math.sqrt(n.__deg || 0)).distanceMax(700);
 G.d3Force("link").distance((l) => 52 + 9 * Math.sqrt((nodes.get(srcId(l))?.__deg || 1) + (nodes.get(dstId(l))?.__deg || 1)));
-// World layer floats above, the company's own layer settles below it.
+// What is studied floats above; the company's own layer, or the reasoning about the subject, settles below.
 let forceNodes = [];
 const layerForce = Object.assign((alpha) => {
   for (const n of forceNodes) {
-    n.vy += ((n.layer === "company" ? -80 : 18) - n.y) * alpha * 0.05;
+    n.vy += ((lowerLayer(n.layer) ? -80 : 18) - n.y) * alpha * 0.05;
     // Gentle gravity keeps unlinked nodes from drifting off to the edge of the charge range.
     const g = (n.__deg ? 0.012 : 0.05) * alpha;
     n.vx -= n.x * g;
@@ -286,9 +293,9 @@ function visual(n) {
   if (n.__v) return n.__v;
   const group = new THREE.Group();
   const coreMat = orbMaterial();
-  // The company's own layer reads as wireframe crystals; the market world as solid orbs.
+  // The lower layer (company, reasoning) reads as wireframe crystals; the upper one as solid orbs.
   let core = new THREE.Mesh(sphereGeo, coreMat);
-  if (n.layer === "company") {
+  if (lowerLayer(n.layer)) {
     const heart = core;
     heart.scale.setScalar(0.42);
     core = new THREE.Group().add(
@@ -320,13 +327,14 @@ function styleNode(n) {
   v.core.traverse((o) => { if (o.material && o.material !== v.coreMat) o.material.color.copy(color); });
   v.core.scale.setScalar(r);
   v.halo.material.color.copy(color);
-  v.halo.scale.setScalar(r * (n.layer === "company" ? 4.5 : 5.5));
+  v.halo.scale.setScalar(r * (lowerLayer(n.layer) ? 4.5 : 5.5));
   v.label.position.set(0, -r * 1.05, 0);
   v.el.style.setProperty("--c", t.color);
   v.el.querySelector(".n").textContent = n.name;
   v.el.querySelector(".t").textContent = t.label;
   v.el.classList.toggle("hub", (n.__deg || 0) >= HUB_DEGREE);
   v.el.classList.toggle("pending", !!n.pending);
+  v.el.classList.toggle("ungrounded", NEEDS_GROUNDING.has(n.type) && !graph.groundings?.[n.id]);
   const d = primaryData(n);
   const val = v.el.querySelector(".v");
   val.replaceChildren();
@@ -663,7 +671,7 @@ function renderLegend() {
   const present = [...counts.keys()].sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
   legend.replaceChildren(...present.map((type) => {
     const t = typeOf(type);
-    const company = graph.nodes.find((n) => n.type === type)?.layer === "company";
+    const company = lowerLayer(graph.nodes.find((n) => n.type === type)?.layer);
     return el("button", {
       type: "button", class: "chip", style: `--c:${t.color}`, "aria-pressed": String(typeFilter.has(type)),
       onclick: () => { typeFilter.has(type) ? typeFilter.delete(type) : typeFilter.add(type); renderLegend(); refreshFocus(); },
@@ -687,7 +695,7 @@ async function refreshData() {
   btn.classList.add("spinning");
   btn.disabled = true;
   try {
-    const res = await fetch(q("/api/refresh"), { method: "POST" });
+    const res = await request(q("/api/refresh"), { method: "POST" });
     const r = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(r.detail || `刷新失败（${res.status}）`);
     lastRefresh = new Date();
@@ -851,7 +859,7 @@ function renderNode(box, n) {
   box.append(el("h2", {}, n.name));
   if (n.aliases?.length) box.append(el("div", { class: "aliases" }, n.aliases.join(" / ")));
   box.append(el("div", { class: "badges" },
-    el("span", { class: "badge" }, n.layer === "company" ? "公司层" : "世界层"),
+    el("span", { class: "badge" }, LAYERS[n.layer] || n.layer || "—"),
     n.pending && el("span", { class: "badge warn" }, "待审核"),
     el("span", { class: "badge" }, provenanceText(n.provenance)),
   ));
@@ -861,7 +869,8 @@ function renderNode(box, n) {
     box.append(el("h3", {}, el("span", {}, "数据"), el("span", {}, String(data.length))));
     for (const d of data) box.append(dataCard(d));
   }
-  box.append(newsSection(n.id));
+  if (projectPacks.includes("market")) box.append(newsSection(n.id));
+  if (NEEDS_GROUNDING.has(n.type) || graph.groundings?.[n.id]) box.append(groundingSection(n.id, NEEDS_GROUNDING.has(n.type)));
   const props = Object.entries(n.props || {});
   if (props.length) {
     box.append(el("h3", {}, "属性"));
@@ -939,7 +948,7 @@ const newsCache = new Map();
 async function loadNews(nodeId) {
   const hit = newsCache.get(nodeId);
   if (hit && Date.now() - hit.at < 60000) return hit.items;
-  const res = await fetch(q(`/api/nodes/${encodeURIComponent(nodeId)}/news`));
+  const res = await request(q(`/api/nodes/${encodeURIComponent(nodeId)}/news`));
   const items = res.ok ? await res.json() : [];
   newsCache.set(nodeId, { at: Date.now(), items });
   return items;
@@ -989,7 +998,37 @@ function renderLink(box, l) {
       el("span", { class: "dir" }, dir), el("span", { class: "who" }, el("em", {}, typeOf(n.type).label), n.name), svg(ICON.go))));
   }
   box.append(el("h3", {}, "两端"), ends);
+  if (graph.groundings?.[l.id]) box.append(groundingSection(l.id, false));
   box.append(evidenceSection(l.id));
+}
+
+function groundingSection(targetId, wanted) {
+  const summary = graph.groundings?.[targetId];
+  const count = summary ? Object.entries(summary).filter(([k]) => k !== "pending").reduce((a, [, v]) => a + v, 0) : 0;
+  const wrap = el("section", { class: "groundings" },
+    el("h3", {}, el("span", {}, "文献依据"), el("span", {}, count ? String(count) : "无")));
+  if (!count) {
+    wrap.append(el("p", { class: "news-empty" }, wanted ? "还没有文献依据。在文献模式里选中一段原文，关联到这个节点；或者让 Agent 去找。" : "还没有文献依据。"),
+      el("div", { class: "g-acts" },
+        el("button", { type: "button", class: "btn sm", onclick: () => setMode("library") }, "打开文献库"),
+        el("button", { type: "button", class: "btn sm", onclick: () => askAgent(`请在文献库和学术检索里为「${nodes.get(targetId)?.name ?? targetId}」找依据，读原文后用 ground 关联。`) }, "让 Agent 找")));
+    return wrap;
+  }
+  const list = el("div", {}, el("p", { class: "news-empty" }, "读取中…"));
+  wrap.append(list);
+  request(q(`/api/groundings?target_id=${encodeURIComponent(targetId)}`)).then((r) => r.json()).then((gs) => {
+    list.replaceChildren(...gs.map((g) => {
+      const st = STANCES[g.stance] || { label: g.stance, tone: "dim" };
+      return el("button", { type: "button", class: "g-card", onclick: () => { setMode("library"); library.openItem(g.item_id, g.excerpt_id ? "excerpts" : "groundings"); } },
+        el("div", { class: "g-head" }, el("span", { class: `stance ${st.tone}` }, st.label),
+          el("span", { class: "g-cite" }, `${(g.authors || "佚名").split(";")[0].split(",")[0]} ${g.year ?? ""}`.trim()),
+          (g.cs_status === "open" || g.cs_status === "pending") && el("span", { class: "badge warn" }, "待审核")),
+        el("div", { class: "g-title" }, g.item_title),
+        g.quote && el("blockquote", {}, g.quote.length > 220 ? `${g.quote.slice(0, 220)}…` : g.quote, g.page != null ? el("small", {}, ` 第 ${g.page} 页`) : null),
+        g.rationale && el("p", { class: "g-why" }, g.rationale));
+    }));
+  }).catch(() => list.replaceChildren(el("p", { class: "news-empty" }, "依据读取失败")));
+  return wrap;
 }
 
 const VERDICT = { supports: ["支持", "ok"], reverse: ["方向相反", "warn"], contradicts: ["反驳", "bad"], weak: ["弱", "dim"], insufficient: ["数据不足", "dim"] };
@@ -1023,7 +1062,7 @@ function evidenceSection(linkId) {
   const head = el("h3", {}, el("span", {}, "证据"), el("span", {}, "…"));
   const body = el("div", {}, el("p", { class: "news-empty" }, "读取中…"));
   wrap.append(head, body);
-  fetch(q(`/api/links/${encodeURIComponent(linkId)}/evidence`)).then((r) => r.json()).then((ev) => {
+  request(q(`/api/links/${encodeURIComponent(linkId)}/evidence`)).then((r) => r.json()).then((ev) => {
     head.lastChild.textContent = ev.evidence.length ? `强度 ${ev.strength.toFixed(2)}` : "无";
     if (!ev.evidence.length) {
       body.replaceChildren(el("p", { class: "news-empty" }, "还没有证据：两端都绑定数据后会计算联动，新闻同时提到两端时会记为共现。"));
@@ -1061,7 +1100,7 @@ function evidenceSection(linkId) {
 // ------------------------------------------------------------------ review
 
 async function post(url, okText) {
-  const res = await fetch(q(url), { method: "POST" });
+  const res = await request(q(url), { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     toast(body.detail || `操作失败（${res.status}）`, true);
@@ -1117,10 +1156,20 @@ const logBox = $("#log");
 const nearBottom = () => logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 80;
 function scrollLog(force) { if (force || nearBottom()) logBox.scrollTo({ top: logBox.scrollHeight, behavior: REDUCED ? "auto" : "smooth" }); }
 
+/** The agent's reply as Markdown: tables, lists, formulas…; [[n_…]] names the node and flies to it, and
+    [@key] opens the source in the library. */
 function richText(text) {
-  const span = el("div");
-  span.innerHTML = esc(text).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
-  return [...span.childNodes];
+  const cite = (key, loc) => el("button", { type: "button", class: "chat-ref cite", title: loc || null,
+    onclick: () => { setMode("library"); library.openCitekey(key); } }, `@${key}`, loc ? el("small", {}, ` ${loc}`) : null);
+  return renderMarkdown(text, {
+    breaks: true,
+    cite: (keys, locs) => (keys.length === 1 ? cite(keys[0], locs[keys[0]]) : el("span", {}, ...keys.map((k) => cite(k, locs[k])))),
+    ref: (id) => {
+      const n = nodes.get(id);
+      if (!id.startsWith("n_") || !n) return el("code", {}, id);
+      return el("button", { type: "button", class: "chat-ref", onclick: () => select({ kind: "node", id }, true) }, n.name);
+    },
+  });
 }
 
 // ------------------------------------------------------------------ research report
@@ -1148,7 +1197,7 @@ for (const b of document.querySelectorAll(".panel-tabs [data-tab]")) b.addEventL
 
 async function loadReport() {
   try {
-    const res = await fetch(q(viewingAt ? `/api/report?at=${encodeURIComponent(viewingAt)}` : "/api/report"));
+    const res = await request(q(viewingAt ? `/api/report?at=${encodeURIComponent(viewingAt)}` : "/api/report"));
     const r = await res.json();
     report = r.report;
     reportState = r.state;
@@ -1218,6 +1267,7 @@ function reportStatus() {
 }
 
 function renderReport() {
+  $("#rp-insert").hidden = !report || !!viewingAt;
   sentenceIndex.clear();
   pinned = null;
   reportFocus = null;
@@ -1277,11 +1327,12 @@ function renderReport() {
   body.replaceChildren(...parts.filter(Boolean));
 }
 
+$("#rp-insert").addEventListener("click", () => { if (report) writing.insertReport(report); });
 $("#rp-regen").addEventListener("click", async () => {
   reportState = { ...(reportState || {}), writing: true };
   reportStatus();
   try {
-    const res = await fetch(q("/api/report/regenerate"), { method: "POST" });
+    const res = await request(q("/api/report/regenerate"), { method: "POST" });
     if (!res.ok) { const b = await res.json().catch(() => ({})); toast(b.detail || "研报生成失败", true); }
   } catch { toast("研报生成失败", true); }
   loadReport();
@@ -1299,7 +1350,7 @@ const pastCache = new Map();
 
 async function loadHistory() {
   try {
-    const h = await (await fetch(q("/api/history"))).json();
+    const h = await (await request(q("/api/history"))).json();
     commits = h.commits || [];
     reportVersions = h.reports || [];
   } catch { return; }
@@ -1353,7 +1404,7 @@ async function goTo(i) {
   const c = commits[i];
   let past = pastCache.get(c.id);
   if (!past) {
-    try { past = await (await fetch(q(`/api/graph?at=${encodeURIComponent(c.id)}`))).json(); }
+    try { past = await (await request(q(`/api/graph?at=${encodeURIComponent(c.id)}`))).json(); }
     catch { toast("读取历史状态失败", true); return; }
     pastCache.set(c.id, past);
   }
@@ -1438,7 +1489,7 @@ let models = null;         // what the model endpoint (magpie) offers
 const PROVIDERS = { claude: "Claude · 经 Claude Code 订阅", codex: "Codex · 经 Codex 订阅", anthropic: "Anthropic API" };
 
 async function loadModels() {
-  try { models = await (await fetch("/api/models")).json(); } catch { models = null; }
+  try { models = await (await request("/api/models")).json(); } catch { models = null; }
   renderModel();
 }
 
@@ -1452,7 +1503,7 @@ function renderModel() {
   $("#model-name").textContent = active ? shortName(active) : "模型";
   const provider = active?.split("/")[0];
   $("#model-btn").dataset.provider = provider || "";
-  $("#model-btn").dataset.tip = active ? `${active}${models?.via ? " · 经 magpie" : ""}` : "选择模型";
+  $("#model-btn").dataset.tip = active ? `${active}${models?.via ? ` · 经 ${models.via}` : ""}` : "选择模型";
   const menu = $("#model-menu");
   if (!models) { menu.replaceChildren(el("p", { class: "sess-empty" }, "读不到模型列表")); return; }
   const groups = new Map();
@@ -1468,7 +1519,7 @@ function renderModel() {
         onclick: () => chooseModel(m.id),
       }, el("span", { class: "model-label" }, m.name), m.id === models.default && el("span", { class: "model-tag" }, "默认"),
         m.context && el("span", { class: "model-ctx" }, `${Math.round(m.context / 1000)}K`))))),
-    el("p", { class: "model-foot" }, models.via ? `经 magpie 路由 · ${models.base_url}` : models.base_url, models.error ? ` · ${models.error}` : ""),
+    el("p", { class: "model-foot" }, [models.via, models.base_url, models.error].filter(Boolean).join(" · ")),
   );
 }
 
@@ -1518,7 +1569,7 @@ $("#new-session").addEventListener("click", () => {
 
 function log(kind, text) {
   const stick = nearBottom();
-  const line = el("div", { class: `msg ${kind}` }, ...(kind === "assistant" ? richText(text) : [text]));
+  const line = el("div", { class: `msg ${kind}${kind === "assistant" ? " md" : ""}` }, ...(kind === "assistant" ? richText(text) : [text]));
   logBox.insertBefore(line, thinking?.isConnected ? thinking : null);
   scrollLog(stick || kind === "user");
   if (kind !== "tool") closeToolGroup();
@@ -1570,10 +1621,112 @@ const input = $("#input");
 function syncSend() { $("#send").disabled = busy || !input.value.trim(); if (busy) $("#send").disabled = false; }
 function autosize() { input.style.height = "auto"; input.style.height = `${Math.min(input.scrollHeight, 180)}px`; }
 
+let projectPacks = [];       // the project's type packs; the news desk only serves market projects
 function showProject(p) {
   if (!p) return;
+  projectPacks = p.packs || [];
   $("#project-name").textContent = p.name;
   document.title = `${p.name} · 本体工作台`;
+}
+
+// ------------------------------------------------------------------ modes: graph / library / writing
+
+const MODES = ["graph", "library", "writing", "split"];
+const MODE_LABEL = { graph: "图谱", library: "文献", writing: "写作", split: "对照阅读与写作" };
+let mode = "graph";
+let lastPane = "library";    // in the split view, the pane the person last worked in
+let chatContext = null;      // what the library or the paper shows, sent with chat messages so the agent knows
+let writingContext = null;
+const openNodeInGraph = (id) => {
+  if (!nodes.has(id)) { toast("这个节点不在当前的图里", true); return; }
+  setMode("graph");
+  select({ kind: "node", id }, true);
+};
+const shell = createShell({ storageKey: `onto.shell.${PROJECT}`, toast });
+const focused = (pane) => mode === pane || (mode === "split" && lastPane === pane);
+let msInfo = null;           // the open manuscript's word count and style, for the status bar
+const library = initLibrary({
+  root: $("#library"),
+  // In the split view a paper gets its tab when it first opens; later redraws (a new excerpt) leave the current tab alone.
+  onOpen: (kind, id, title) => shell.tabs.opened(kind, id, title, focused("library")
+    || (mode === "split" && !shell.tabs.list().some((t) => t.key === `${kind}:${id}`))),
+  onGone: (kind, id) => shell.tabs.forget(kind, id),
+  // A passage from the reader goes into the section being written; the draft comes into view beside the paper.
+  citeInDraft: async (passage) => {
+    if (mode !== "split" && mode !== "writing") await setMode(NARROW.matches ? "writing" : "split");
+    return writing.insertPassage(passage);
+  },
+  q,
+  toast,
+  nodes: () => graph.nodes,
+  openNode: openNodeInGraph,
+  setContext: (ctx) => { chatContext = ctx; },
+  askAgent: (text, now = true) => askAgent(text, now),
+});
+const writing = initWriting({
+  root: $("#writing"),
+  onOpen: (kind, id, title, info) => { msInfo = { title, ...info }; shell.tabs.opened(kind, id, title, focused("writing")); syncStatus(); },
+  onGone: (kind, id) => { msInfo = null; shell.tabs.forget(kind, id); syncStatus(); },
+  q,
+  toast,
+  nodes: () => graph.nodes,
+  openNode: openNodeInGraph,
+  // A citation opens its paper; one with a page ("[@key, p. 4]") opens 原文 at that page. Side by side stays side by side.
+  openItem: async (id, at) => {
+    if (mode !== "split") await setMode("library");
+    await library.openItem(id, at?.page != null ? "text" : undefined);
+    if (at?.page != null) library.showPage(at.page);
+  },
+  setContext: (ctx) => { writingContext = ctx; },
+  askAgent: (text, now = true) => askAgent(text, now),
+  onCheck: (p) => { problems?.set(p); syncStatus(); },
+});
+
+const NARROW = matchMedia("(max-width: 820px)");
+const panes = (m) => ({ graph: [], library: ["library"], writing: ["writing"], split: ["library", "writing"] })[m];
+/** Switch what the work area shows. Resolves once the panes that came into view have loaded. */
+function setMode(next) {
+  if (next === "split" && NARROW.matches) next = "library";  // side by side needs room
+  if (next === mode || !MODES.includes(next)) return Promise.resolve();
+  const was = panes(mode), now = panes(next);
+  mode = next;
+  document.body.classList.toggle("mode-library", now.includes("library"));
+  document.body.classList.toggle("mode-writing", now.includes("writing"));
+  document.body.classList.toggle("mode-split", mode === "split");
+  for (const b of document.querySelectorAll("#modes [data-mode]")) b.setAttribute("aria-checked", String(b.dataset.mode === mode));
+  shell.setActive(mode);
+  if (mode !== "graph") select(null);
+  if (was.includes("library") && !now.includes("library")) library.hide();
+  if (was.includes("writing") && !now.includes("writing")) writing.hide();
+  const shown = [];
+  if (now.includes("library") && !was.includes("library")) shown.push(library.show());
+  if (now.includes("writing") && !was.includes("writing")) shown.push(writing.show());
+  if (mode === "graph") shell.tabs.deselect();
+  else markCurrentTab();
+  history.replaceState(null, "", mode === "graph" ? location.pathname + location.search : `#${mode}`);
+  syncStatus();
+  return Promise.all(shown);
+}
+/** The tab of whatever the focused pane shows. */
+function markCurrentTab() {
+  if (focused("writing")) { const m = writing.current(); if (m) { shell.tabs.opened("manuscript", m.id, m.title); return; } }
+  if (focused("library") || mode === "split") { const c = library.current(); if (c) { shell.tabs.activate(`${c.kind}:${c.id}`); return; } }
+  shell.tabs.deselect();
+}
+for (const id of ["library", "writing"]) $(`#${id}`).addEventListener("pointerdown", () => {
+  if (mode !== "split" || lastPane === id) return;
+  lastPane = id;
+  markCurrentTab();
+}, true);
+for (const b of document.querySelectorAll("#modes [data-mode]")) b.addEventListener("click", () => setMode(b.dataset.mode));
+addEventListener("onto:mode", (e) => setMode(e.detail));
+
+function askAgent(text, now = true) {
+  if (document.body.classList.contains("panel-collapsed")) dockActions.panel();
+  if (panelTab !== "chat") setTab("chat");
+  if (now && !busy) { send(text); return; }
+  input.value = input.value ? `${input.value}\n${text}` : text;
+  autosize(); syncSend(); input.focus();
 }
 
 let ws;
@@ -1584,7 +1737,7 @@ function setConn(state) {
 }
 function connect() {
   const sess = currentSession ? `?session=${encodeURIComponent(currentSession)}` : "";
-  ws = new WebSocket(q(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws${sess}`));
+  ws = socket(q(`/ws${sess}`));
   ws.onopen = () => setConn("on");
   ws.onmessage = (evt) => {
     const msg = JSON.parse(evt.data);
@@ -1592,9 +1745,12 @@ function connect() {
       liveSnapshot = msg;
       if (viewingAt) return;  // keep showing the past state; "回到现在" brings the live one back
       showProject(msg.project); applyGraph(msg.graph); renderReview(msg.review, msg.proposed_types);
+      writing.onGraph();
       if (msg.news_refreshed != null && lastRefresh) toast(msg.news_refreshed ? `新闻已更新：${msg.news_refreshed} 篇新报道` : "新闻已是最新");
     }
     else if (msg.type === "history") loadHistory();
+    else if (msg.type === "library") library.onMessage(msg);
+    else if (msg.type === "manuscript") writing.onMessage(msg);
     else if (msg.type === "session") showSession(msg);
     else if (msg.type === "report") {
       if (viewingAt) return;
@@ -1608,14 +1764,25 @@ function connect() {
     else if (msg.type === "error") log("error", msg.text);
     else if (msg.type === "status") { if (msg.text) log("note", msg.text); setBusy(msg.busy); }
   };
-  ws.onclose = () => { setConn("off"); setBusy(false); setTimeout(connect, 1500); };
+  ws.onclose = async () => {
+    setConn("off");
+    setBusy(false);
+    const session = await request("/auth/session").catch(() => null);
+    if (session?.status === 401) go(routes.login, { replace: true });
+    else setTimeout(connect, 1500);
+  };
 }
 connect();
+if (MODES.includes(location.hash.slice(1))) setMode(location.hash.slice(1));
+addEventListener("pageshow", (event) => { if (event.persisted) location.reload(); });
 
 function send(text = input.value.trim()) {
   if (!text || busy || ws.readyState !== WebSocket.OPEN) return;
   log("user", text);
-  ws.send(JSON.stringify({ type: "chat", text }));
+  // Side by side, the agent hears about both the paper being read and the section being written.
+  const context = mode === "library" ? chatContext : mode === "writing" ? writingContext
+    : mode === "split" && (chatContext || writingContext) ? { ...chatContext, ...writingContext } : null;
+  ws.send(JSON.stringify({ type: "chat", text, ...(context ? { context } : {}) }));
   input.value = "";
   autosize();
   syncSend();
@@ -1631,11 +1798,6 @@ syncSend();
 // ------------------------------------------------------------------ keyboard
 
 addEventListener("keydown", (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
-    e.preventDefault();
-    if (!$("#search").hidden) { searchInput.focus(); searchInput.select(); }
-    return;
-  }
   if (e.key === "Escape") {
     if (viewingAt && !pinned) { goTo(commits.length); return; }
     if (pinned) { pinned = null; document.querySelectorAll("#report-body .rs.pinned").forEach((n) => n.classList.remove("pinned")); setReportFocus(null); return; }
@@ -1646,6 +1808,218 @@ addEventListener("keydown", (e) => {
   }
   if (typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
   const map = { r: "fit", " ": "rotate", l: "labels", "\\": "panel", u: "refresh", t: "timeline" };
+  if (["1", "2", "3", "4"].includes(e.key)) { e.preventDefault(); setMode(MODES[Number(e.key) - 1]); return; }
   if (e.key === "/") { e.preventDefault(); if (document.body.classList.contains("panel-collapsed")) dockActions.panel(); input.focus(); }
   else if (map[e.key.toLowerCase()] && !(map[e.key.toLowerCase()] !== "panel" && graph.nodes.length === 0)) { e.preventDefault(); dockActions[map[e.key.toLowerCase()]](); }
 });
+
+// ------------------------------------------------------------------ workbench shell: commands, quick open, tabs, status
+
+const icon = (d) => `<svg viewBox="0 0 20 20" aria-hidden="true">${d}</svg>`;
+const ICONS = {
+  graph: icon('<circle cx="5" cy="6" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="15" cy="5" r="2" fill="none" stroke="currentColor" stroke-width="1.4"/><circle cx="10" cy="15" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M6.8 7.2 8.8 13M13.9 6.7l-3 6.3M7 6h6" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'),
+  library: icon('<path d="M4 3.5h3v13H4zM8.5 3.5h3v13h-3z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m13 4.3 2.8-.8 2.6 12.4-2.8.7z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'),
+  writing: icon('<path d="M4 16h3.2L16 7.2 12.8 4 4 12.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/><path d="m11 5.8 3.2 3.2" stroke="currentColor" stroke-width="1.4"/>'),
+  split: icon('<rect x="2.8" y="4" width="14.4" height="12" rx="2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10 4v12M5 7.5h2.6M5 10h2.6M12.4 7.5H15M12.4 10H15" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>'),
+  open: icon('<circle cx="8.6" cy="8.6" r="4.8" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m12.2 12.2 4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>'),
+  command: icon('<rect x="3" y="4" width="14" height="12" rx="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="m6.5 8 2.4 2-2.4 2M10.5 12.5h3" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>'),
+  agent: icon('<rect x="3" y="4" width="14" height="12" rx="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M12 4v12" stroke="currentColor" stroke-width="1.4"/>'),
+  home: icon('<path d="M3.5 9 10 3.8 16.5 9v7a.8.8 0 0 1-.8.8H12v-5H8v5H4.3a.8.8 0 0 1-.8-.8z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>'),
+  settings: icon('<circle cx="10" cy="10" r="2.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10 2.8v2.1M10 15.1v2.1M2.8 10h2.1M15.1 10h2.1M4.9 4.9l1.5 1.5M13.6 13.6l1.5 1.5M4.9 15.1l1.5-1.5M13.6 6.4l1.5-1.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>'),
+};
+
+const hasGraph = () => graph.nodes.length > 0;
+const inGraph = async () => { await setMode("graph"); };
+const C = (id, group, title, run, extra = {}) => shell.command({ id, group, title, run, ...extra });
+
+C("view.graph", "视图", "图谱", () => setMode("graph"), { keys: "1" });
+C("view.library", "视图", "文献库", () => setMode("library"), { keys: "2" });
+C("view.writing", "视图", "写作", () => setMode("writing"), { keys: "3" });
+C("view.split", "视图", "对照：左边读文献，右边写论文", () => setMode("split"), { keys: "4", aliases: "split side by side 分屏 并排" });
+C("shell.open", "", "快速打开…", () => shell.openPalette(), { keys: "mod+p", hidden: true });
+C("shell.commands", "", "显示所有命令", () => shell.openPalette(">"), { keys: "mod+shift+p", hidden: true });
+
+C("graph.search", "图谱", "搜索节点", async () => { await inGraph(); searchInput.focus(); searchInput.select(); }, { keys: "mod+k" });
+C("graph.fit", "图谱", "适配视角", async () => { await inGraph(); dockActions.fit(); }, { keys: "r", when: hasGraph, unavailable: "图里还没有节点" });
+C("graph.rotate", "图谱", "开关自动环绕", async () => { await inGraph(); dockActions.rotate(); }, { keys: "space", when: hasGraph, unavailable: "图里还没有节点" });
+C("graph.labels", "图谱", "开关全部标签", async () => { await inGraph(); dockActions.labels(); }, { keys: "l", when: hasGraph, unavailable: "图里还没有节点" });
+C("graph.dims", "图谱", "切换 3D / 2D", async () => { await inGraph(); setDimensions(G.numDimensions() === 3 ? 2 : 3); syncDock(); }, { when: hasGraph, unavailable: "图里还没有节点" });
+C("graph.timeline", "图谱", "开关时间轴", async () => { await inGraph(); dockActions.timeline(); }, { keys: "t", when: hasGraph, unavailable: "图里还没有节点" });
+C("graph.refresh", "图谱", "立即刷新数据", () => dockActions.refresh(), { keys: "u" });
+C("review.open", "审核", "打开待审核的变更", () => setReviewOpen(true), { when: () => !$("#review-wrap").hidden, unavailable: "没有待审核的变更" });
+
+C("agent.toggle", "Agent", "显示或隐藏对话面板", () => dockActions.panel(), { keys: "\\" });
+C("agent.ask", "Agent", "向 Agent 提问", () => { if (document.body.classList.contains("panel-collapsed")) dockActions.panel(); setTab("chat"); input.focus(); }, { keys: "/" });
+C("agent.new", "Agent", "新对话", () => $("#new-session").click());
+C("agent.report", "Agent", "查看研报", () => { if (document.body.classList.contains("panel-collapsed")) dockActions.panel(); setTab("report"); });
+C("agent.undo", "Agent", "撤销最近一次生效的变更集", () => $("#undo").click());
+C("agent.model", "Agent", "选择模型", () => { if (document.body.classList.contains("panel-collapsed")) dockActions.panel(); setModelOpen(true); });
+
+const toLibrary = async () => { if (mode !== "split") await setMode("library"); };
+const toWriting = async () => { if (mode !== "split") await setMode("writing"); };
+C("library.add", "文献", "按 DOI / arXiv / ISBN / 网址添加", async () => { await toLibrary(); library.start("add"); });
+C("library.upload", "文献", "上传 PDF 或文本", async () => { await toLibrary(); library.start("upload"); });
+C("library.import", "文献", "导入 BibTeX / RIS / CSL-JSON", async () => { await toLibrary(); library.start("import"); });
+C("library.scholarly", "文献", "检索学术文献（OpenAlex）", async () => { await toLibrary(); library.start("scholarly"); });
+C("library.manual", "文献", "手动填写一条", async () => { await toLibrary(); library.start("manual"); });
+C("library.note", "笔记", "新建笔记", async () => { await toLibrary(); library.start("note"); });
+C("library.bib", "文献", "导出整个文献库的 BibTeX", () => download(q("/api/library/export.bib"), "library.bib"));
+
+const hasMs = () => Boolean(writing.current());
+C("writing.new", "写作", "新建论文", async () => { await toWriting(); writing.newManuscript(); });
+for (const [fmt, label, formatted] of [["docx", "导出 Word（DOCX）"], ["tex", "导出 LaTeX 工程"], ["md", "导出 Markdown + BibTeX"], ["md", "导出 Markdown（引用已排版）", true], ["bib", "导出本文引用的 BibTeX"]]) {
+  C(`writing.export.${fmt}${formatted ? ".formatted" : ""}`, "写作", label, () => writing.export(fmt, formatted), { when: hasMs, unavailable: "先打开一篇论文" });
+}
+
+C("problems.toggle", "问题", "显示或隐藏问题面板", () => problems.toggle(), { keys: "mod+shift+m", aliases: "problems 引用检查 check" });
+C("problems.next", "问题", "下一个问题", async () => { await toWriting(); problems.next(1); }, { keys: "f8", when: () => problems.counts().error + problems.counts().warning + problems.counts().info > 0, unavailable: "引用检查没有发现问题" });
+C("problems.prev", "问题", "上一个问题", async () => { await toWriting(); problems.next(-1); }, { keys: "shift+f8", when: () => problems.counts().error + problems.counts().warning + problems.counts().info > 0, unavailable: "引用检查没有发现问题" });
+C("problems.recheck", "问题", "重新运行引用检查", () => writing.recheck(), { when: hasMs, unavailable: "先打开一篇论文" });
+for (const [kind, label] of [["rewrite", "改写选中的文字（Agent 给出修改建议）"], ["support", "为选中的文字找支持文献"], ["counter", "为选中的文字找反例"], ["verify", "核对选中文字的引文和数字"], ["ask", "就选中的文字问 Agent"]]) {
+  C(`selection.${kind}`, "选中文字", label, () => writing.onSelection(kind), { when: () => (mode === "writing" || mode === "split") && hasMs(), unavailable: "先在写作里选中一段文字" });
+}
+
+C("tabs.next", "标签", "下一个标签", () => shell.tabs.cycle(1), { when: () => shell.tabs.list().length > 1, unavailable: "只有一个标签" });
+C("tabs.prev", "标签", "上一个标签", () => shell.tabs.cycle(-1), { when: () => shell.tabs.list().length > 1, unavailable: "只有一个标签" });
+C("tabs.close", "标签", "关闭当前标签", () => shell.tabs.close(shell.tabs.current()), { when: () => Boolean(shell.tabs.current()), unavailable: "没有选中的标签" });
+C("tabs.closeAll", "标签", "关闭全部标签", () => { for (const t of [...shell.tabs.list()]) shell.tabs.close(t.key); }, { when: () => shell.tabs.list().length > 0, unavailable: "没有打开的标签" });
+
+C("go.projects", "前往", "全部项目", () => go(routes.projects));
+C("go.settings", "前往", "平台设置", () => go(routes.view("settings")));
+C("go.sources", "前往", "数据源", () => go(routes.view("sources")));
+
+// Activity bar
+shell.railItem({ id: "graph", icon: ICONS.graph, tip: "图谱", command: "view.graph" });
+shell.railItem({ id: "library", icon: ICONS.library, tip: "文献库", command: "view.library" });
+shell.railItem({ id: "writing", icon: ICONS.writing, tip: "写作", command: "view.writing" });
+shell.railItem({ id: "split", icon: ICONS.split, tip: "对照阅读与写作", command: "view.split" });
+shell.railGap();
+shell.railItem({ id: "open", icon: ICONS.open, tip: "快速打开", command: "shell.open" });
+shell.railItem({ id: "commands", icon: ICONS.command, tip: "命令", command: "shell.commands" });
+shell.railItem({ id: "agent", icon: ICONS.agent, tip: "对话面板", command: "agent.toggle", bottom: true });
+shell.railItem({ id: "projects", icon: ICONS.home, tip: "全部项目", href: routes.projects, bottom: true });
+shell.railItem({ id: "settings", icon: ICONS.settings, tip: "平台设置", href: routes.view("settings"), bottom: true });
+shell.setActive(mode);
+
+// Tabs live in the header, after the project name.
+$("#brand").append(shell.tabs.strip);
+shell.tabs.opener("item", async (t) => { await toLibrary(); await library.openItem(t.id); });
+shell.tabs.opener("note", async (t) => { await toLibrary(); await library.openNote(t.id); });
+shell.tabs.opener("manuscript", async (t) => { await toWriting(); await writing.openManuscript(t.id); });
+
+// Quick open: papers, notes, manuscripts and their sections, graph nodes.
+const listApi = async (path) => {
+  const res = await request(q(path));
+  if (!res.ok) throw new Error(`请求失败（${res.status}）`);
+  return res.json();
+};
+const firstAuthor = (a) => {
+  const s = String(a || "").trim();
+  if (!s) return "佚名";
+  const parts = s.split(/\s*(?:;|、|\band\b|,(?=\s*[A-Z一-鿿][^,]*(?:,|$)))\s*/);
+  return parts.length > 1 ? `${parts[0]} 等` : s;
+};
+shell.source(async (query) => {
+  const out = await listApi(`/api/library?limit=${query ? 25 : 12}${query ? `&q=${encodeURIComponent(query)}` : ""}`);
+  return (out.items || []).map((it) => ({
+    kind: "item", key: `item:${it.id}`, label: it.title, detail: [firstAuthor(it.authors), it.year, `@${it.citekey}`].filter(Boolean).join(" · "),
+    matched: Boolean(query), run: async () => { await toLibrary(); await library.openItem(it.id); },
+  }));
+});
+shell.source(async (query) => {
+  const out = await listApi(`/api/notes?limit=${query ? 25 : 8}${query ? `&q=${encodeURIComponent(query)}` : ""}`);
+  return (Array.isArray(out) ? out : []).map((n) => ({
+    kind: "note", key: `note:${n.id}`, label: n.title || "无标题笔记", detail: (n.preview || "").replace(/\s+/g, " ").slice(0, 48), matched: Boolean(query),
+    run: async () => { await toLibrary(); await library.openNote(n.id); },
+  }));
+});
+shell.source(async () => {
+  const out = await listApi("/api/manuscripts");
+  const open = writing.current();
+  const rows = (out.manuscripts || []).map((m) => ({
+    kind: "manuscript", key: `manuscript:${m.id}`, label: m.title, detail: `${m.sections ?? 0} 节`, run: async () => { await toWriting(); await writing.openManuscript(m.id); },
+  }));
+  if (open) {
+    for (const s of open.sections) {
+      rows.push({ kind: "section", label: s.heading || "（无标题）", detail: open.title, boost: 0.5,
+        run: async () => { await toWriting(); await writing.openManuscript(open.id, s.id); } });
+    }
+  }
+  return rows;
+});
+shell.source((query) => (query ? graph.nodes : []).slice(0, 2000).map((n) => ({
+  kind: "node", label: n.name || n.id, detail: TYPES[n.type]?.label || n.type,
+  run: () => openNodeInGraph(n.id),
+})));
+
+// Problems panel: the open manuscript's citation check, at the bottom of the work area.
+var problems = createProblems({
+  storageKey: `onto.problems.${PROJECT}`,
+  onReveal: async (issue, manuscriptId) => { await toWriting(); await writing.reveal(issue, manuscriptId); },
+  onRefresh: async () => problems.set(await writing.recheck()),
+});
+problems.set(writing.problems());
+
+// Status bar: connection, graph size, review queue, the open paper; model and shortcuts on the right.
+shell.status("conn", "连接中", { cls: "conn-off", tip: "与工作台的连接" });
+shell.status("mode", MODE_LABEL[mode], { tip: "当前视图 · 1 2 3 4 切换", onclick: () => shell.openPalette(">视图") });
+shell.status("graph", "", { tip: "打开图谱", onclick: () => setMode("graph") });
+shell.status("review", "", { cls: "warn", tip: "打开待审核", onclick: () => setReviewOpen(true) });
+shell.status("paper", "", { side: "right", tip: "当前论文" });
+shell.status("problems", "", { tip: "问题面板 · ⇧⌘M", onclick: () => problems.toggle() });
+shell.status("snapshot", "", { side: "right", onclick: () => shell.run("project.snapshot") });
+shell.status("model", "", { side: "right", tip: "选择模型", onclick: () => shell.run("agent.model") });
+shell.status("keys", "⌘P 快速打开", { side: "right", tip: "命令：⇧⌘P", onclick: () => shell.openPalette() });
+if (!/Mac|iPhone|iPad/.test(navigator.platform)) shell.status("keys", "Ctrl+P 快速打开", { side: "right", tip: "命令：Ctrl+Shift+P" });
+
+function syncStatus() {
+  const conn = $("#conn").className;
+  shell.status("conn", conn.includes("on") ? "● 已连接" : conn.includes("off") ? "● 正在重连" : "● 连接中", { cls: conn.includes("on") ? "conn-on" : "conn-off" });
+  shell.status("mode", MODE_LABEL[mode]);
+  const nodes = $("#stat-nodes").textContent, links = $("#stat-links").textContent;
+  shell.status("graph", `${nodes} 节点 · ${links} 关系`);
+  shell.status("review", $("#review-wrap").hidden ? null : $("#review-count").textContent, { cls: "warn" });
+  const showPaper = msInfo && (mode === "writing" || mode === "split");
+  shell.status("paper", showPaper ? `《${msInfo.title}》 ${Number(msInfo.words || 0).toLocaleString()} 字 · ${msInfo.sections} 节 · ${msInfo.style}` : null);
+  shell.status("model", $("#model-name").textContent || null);
+  if (problems?.hasManuscript()) {
+    const c = problems.counts();
+    shell.status("problems", `⊗ ${c.error}  ⚠ ${c.warning}`, { cls: c.error ? "bad" : c.warning ? "warn" : "" });
+  } else shell.status("problems", null);
+}
+const watch = new MutationObserver(() => syncStatus());
+for (const sel of ["#conn", "#stat-nodes", "#stat-links", "#review-wrap", "#review-count", "#model-name"]) {
+  watch.observe($(sel), { attributes: true, attributeFilter: ["class", "hidden"], childList: true, characterData: true, subtree: true });
+}
+syncStatus();
+
+// Snapshots (local runs only): the project written to its folder as Markdown, BibTeX and JSON, optionally committed.
+let snap = null;
+function syncSnapshot() {
+  if (!snap?.enabled) { shell.status("snapshot", null); return; }
+  const last = snap.last;
+  shell.status("snapshot", last ? `快照 ${ago(last.at)}${last.commit ? ` · ${last.commit}` : ""}` : "还没有快照",
+    { side: "right", tip: `保存快照到 ${snap.folder}` });
+}
+async function loadSnapshot() {
+  try { snap = await listApi(`/api/projects/${encodeURIComponent(PROJECT)}/snapshot`); } catch { snap = null; }
+  syncSnapshot();
+}
+async function takeSnapshot(git) {
+  if (!snap?.enabled) return;
+  try {
+    const res = await request(`/api/projects/${encodeURIComponent(PROJECT)}/snapshot`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ git }) });
+    const out = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(typeof out.detail === "string" ? out.detail : `请求失败（${res.status}）`);
+    const n = out.changed.length + out.removed.length;
+    toast(n ? `快照已保存：${n} 个文件有变化${out.commit ? `，已提交 ${out.commit}` : ""}`
+      : out.commit ? `文件没有变化，已提交 ${out.commit}` : "快照已是最新，没有变化");
+    if (n || out.commit || !snap.last) snap.last = out;
+    syncSnapshot();
+  } catch (e) { toast(`快照没有保存：${e.message}`, true); }
+}
+C("project.snapshot", "项目", "保存快照到项目文件夹", () => takeSnapshot(null), { when: () => Boolean(snap?.enabled), unavailable: "快照只在本机运行时可用", aliases: "snapshot save backup 备份" });
+C("project.snapshot.git", "项目", "保存快照并用 git 提交", () => takeSnapshot(true), { when: () => Boolean(snap?.enabled), unavailable: "快照只在本机运行时可用", aliases: "snapshot git commit 提交" });
+loadSnapshot();
+setInterval(syncSnapshot, 60_000);

@@ -1,3 +1,4 @@
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -12,7 +13,7 @@ from workbench.agent import WorkbenchAgent
 
 @pytest.fixture
 def conn(conn):
-    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT)
+    projects.create(conn, "测试研究项目", project_id=projects.DEFAULT, pack="market")
     return conn
 
 
@@ -21,7 +22,7 @@ def in_project(pid):
 
 
 def test_projects_are_isolated_and_summarised(conn):
-    p = projects.create(conn, "Macro Lab 宏观", "测试用")
+    p = projects.create(conn, "Macro Lab 宏观", "测试用", pack="market")
     assert p["id"].startswith("macro-lab") and p["schema_name"].startswith(projects.PROJECT_SCHEMA_PREFIX)
     s = in_project(p["id"])
     assert s.registry.object_types  # seeded
@@ -45,7 +46,7 @@ def test_projects_are_isolated_and_summarised(conn):
 
 
 def test_export_import_round_trip_and_atomic_failure(conn):
-    p = projects.create(conn, "源", None)
+    p = projects.create(conn, "源", None, pack="market")
     s, human = in_project(p["id"]), None
     a = s.upsert_node("Asset", "比特币", {"kind": "user"}, "x", aliases=["BTC"], props={"symbol": "BTC", "asset_class": "spot"})["node"]
     b = s.upsert_node("MacroIndicator", "联邦基金利率", {"kind": "llm_prior"}, "x")["node"]
@@ -120,7 +121,7 @@ def test_pages_and_project_api(client):
 
 
 def test_chat_writes_into_the_pages_project(client):
-    pid = client.post("/api/projects", json={"name": "沙盒"}).json()["id"]
+    pid = client.post("/api/projects", json={"name": "沙盒", "pack": "market"}).json()["id"]
     with client.websocket_connect(f"/ws?project={pid}") as ws:
         first = ws.receive_json()
         assert first["project"]["id"] == pid and first["graph"]["nodes"] == []
@@ -220,18 +221,23 @@ def test_model_choice_is_per_conversation_and_used(client, monkeypatch):
 
 
 def test_models_endpoint_reads_the_model_list(client, monkeypatch):
-    class R:
-        def raise_for_status(self): pass
-        def json(self):
-            return {"data": [{"id": "codex/gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "owned_by": "codex", "context_window": 500000},
-                             {"id": "claude/claude-opus-5-5", "display_name": "Claude Opus 5.5", "owned_by": "claude"}]}
+    original_client = httpx.Client
 
-    monkeypatch.setattr(server.httpx, "get", lambda *a, **k: R())
-    server._models_cache.clear()
+    def provider(request):
+        assert request.url.path == "/v1/models"
+        return httpx.Response(200, json={"data": [
+            {"id": "codex/gpt-6.1-sol", "display_name": "GPT-6.1-Sol", "owned_by": "codex", "context_window": 500000},
+            {"id": "claude/claude-opus-5-5", "display_name": "Claude Opus 5.5", "owned_by": "claude"},
+        ]})
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-catalog-key")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://models.example")
+    monkeypatch.setattr(server.model_settings, "_stored", lambda user_id: {})
+    monkeypatch.setattr(httpx, "Client",
+                        lambda **kwargs: original_client(transport=httpx.MockTransport(provider), **kwargs))
     data = client.get("/api/models").json()
     ids = [m["id"] for m in data["models"]]
     assert "codex/gpt-6.1-sol" in ids and "claude/claude-opus-5-5" in ids and data["default"] in ids
-    server._models_cache.clear()
 
 
 def test_files_exported_before_the_rename_still_import(conn):
@@ -319,7 +325,7 @@ def test_mcp_client_switches_projects_but_the_workbench_cannot(conn, monkeypatch
     monkeypatch.setattr(mcp_server, "_stores", {})
     monkeypatch.setattr(mcp_server, "_selected", None)
     monkeypatch.delenv("ONTOLOGY_PROJECT", raising=False)
-    p = projects.create(conn, "半导体")
+    p = projects.create(conn, "半导体", pack="market")
     listed = mcp_server.list_projects()
     assert listed["current"] == projects.DEFAULT and p["id"] in {x["id"] for x in listed["projects"]}
 

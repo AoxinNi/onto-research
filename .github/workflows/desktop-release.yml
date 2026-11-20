@@ -1,0 +1,70 @@
+# Builds signed desktop installers for macOS (Apple Silicon and Intel), Windows and Linux when a tag like
+# desktop-v0.1.0 is pushed, and attaches them to a draft GitHub release for review before publishing.
+#
+# Repository settings → Secrets and variables → Actions:
+#   variable  ONTO_DEFAULT_SERVER            https origin of the production workbench (baked into the app)
+#   secrets   APPLE_CERTIFICATE              base64 of the Developer ID Application .p12
+#             APPLE_CERTIFICATE_PASSWORD
+#             APPLE_SIGNING_IDENTITY         e.g. "Developer ID Application: Your Org (TEAMID)"
+#             APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID   for notarization (APPLE_PASSWORD is an app-specific password)
+#   Windows code signing is configured in tauri.conf.json (bundle.windows.signCommand) once a certificate exists.
+name: Desktop release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: windows-latest
+            args: ""
+          - platform: ubuntu-22.04
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ startsWith(matrix.platform, 'macos') && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      - name: System libraries for Tauri
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libdbus-1-dev libssl-dev
+      - run: npm ci
+        working-directory: desktop
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ONTO_DEFAULT_SERVER: ${{ vars.ONTO_DEFAULT_SERVER }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        with:
+          projectPath: desktop
+          tagName: ${{ github.ref_name }}
+          releaseName: "ONTO Research ${{ github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}

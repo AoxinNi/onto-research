@@ -27,8 +27,10 @@
       <a href="/" class="tab" data-view="projects" role="tab">本体项目</a>
       <a href="/sources" class="tab" data-view="sources" role="tab">数据源</a>
       <a href="/mcp" class="tab" data-view="mcp" role="tab">MCP 接入</a>
+      <a href="/settings" class="tab" data-view="settings" role="tab">平台设置</a>
     </div>
     <span class="nav-status" id="nav-status"></span>
+    <button type="button" class="btn sm" id="sign-out" hidden>退出登录</button>
   </nav>
 
   <main>
@@ -44,6 +46,10 @@
           <button type="button" class="btn primary lg" id="create-btn">
             <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
             创建本体项目
+          </button>
+          <button type="button" class="btn lg" id="bigbang-btn" title="把几个项目的图谱、文献和笔记合并成一个新项目">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2" fill="currentColor"/><path d="M8 1.8v2.4M8 11.8v2.4M1.8 8h2.4M11.8 8h2.4M3.6 3.6l1.7 1.7M10.7 10.7l1.7 1.7M3.6 12.4l1.7-1.7M10.7 5.3l1.7-1.7" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>
+            Big Bang
           </button>
           <button type="button" class="btn lg" id="import-btn">导入 JSON</button>
           <a class="btn lg" id="template-btn" href="/api/projects/template" download>下载导入模板</a>
@@ -64,10 +70,89 @@
         <div>
           <p class="eyebrow">DATA SOURCES</p>
           <h1>数据源</h1>
-          <p class="lede">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里，页面上只显示末四位；接入新来源只需新增一个连接器，会自动出现在这里。</p>
+          <p class="lede" id="sources-description">本体里的数值、新闻和社交内容从这些来源采集。每个来源的状态和健康度汇总自全部进行中的项目。需要密钥的来源可以直接在卡片上填写，密钥只保存在本机的 <code>.env</code> 里。</p>
+        </div>
+        <div class="page-actions">
+          <button type="button" class="btn primary lg" id="add-source-btn" hidden>
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            添加数据源
+          </button>
         </div>
       </header>
       <div id="source-groups"><div class="skeleton-grid" aria-hidden="true"><div></div><div></div><div></div></div></div>
+    </section>
+
+    <section id="view-settings" class="view" hidden>
+      <header class="page-head">
+        <div>
+          <p class="eyebrow">WORKBENCH SETTINGS</p>
+          <h1>平台设置</h1>
+          <p class="lede">配置工作台 Agent 使用的模型，以及文献精读用的 MinerU 文档解析。保存后，下一次请求就会使用新的连接。</p>
+        </div>
+      </header>
+      <form id="model-settings" class="panel-card model-settings">
+        <h2>Agent 模型连接</h2>
+        <label class="field">
+          <span>连接方式</span>
+          <select name="mode" disabled>
+            <option value="environment">沿用运行环境</option>
+            <option value="custom">自定义 Anthropic 兼容接口</option>
+            <option value="magpie" hidden>本机 Magpie</option>
+            <option value="ccswitch" hidden>本机 CC Switch</option>
+          </select>
+        </label>
+        <p id="model-route-hint" class="hint"></p>
+        <label id="model-url-field" class="field" hidden>
+          <span>Base URL</span>
+          <input name="base_url" type="url" autocomplete="off" spellcheck="false" maxlength="512" placeholder="https://api.anthropic.com">
+        </label>
+        <label id="model-auth-field" class="field" hidden>
+          <span>鉴权方式</span>
+          <select name="auth_kind">
+            <option value="api_key">API Key（x-api-key）</option>
+            <option value="bearer">Bearer Token</option>
+          </select>
+        </label>
+        <label id="model-name-field" class="field" hidden>
+          <span>默认模型 ID</span>
+          <input name="model" autocomplete="off" spellcheck="false" maxlength="120" list="local-model-options">
+          <datalist id="local-model-options"></datalist>
+        </label>
+        <label id="model-key-field" class="field" hidden>
+          <span>API Key</span>
+          <input name="api_key" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048">
+        </label>
+        <div class="page-actions">
+          <button type="submit" class="btn primary lg" disabled>保存设置</button>
+          <button type="button" class="btn lg" id="test-model-settings" disabled>测试已保存连接</button>
+        </div>
+        <p id="model-settings-result" class="test-result" aria-live="polite" hidden></p>
+      </form>
+
+      <form id="mineru-settings" class="panel-card model-settings" autocomplete="off">
+        <h2>MinerU 文档解析</h2>
+        <p class="hint">文献「精读」用 MinerU 把 PDF 转成 Markdown 和图表。在 mineru.net 的 API 管理页创建密钥后，把 Key ID 和 Secret Key 填在这里；PDF 会上传到下面的服务地址解析。</p>
+        <label class="field">
+          <span>服务地址</span>
+          <input name="url" type="url" spellcheck="false" maxlength="512" placeholder="https://mineru.net/api">
+        </label>
+        <label class="field">
+          <span>Key ID</span>
+          <input name="key_id" spellcheck="false" maxlength="200" placeholder="密钥的 ID，用来认出是哪一把">
+        </label>
+        <label class="field">
+          <span>Secret Key</span>
+          <input name="secret" type="password" autocomplete="new-password" spellcheck="false" maxlength="2048">
+        </label>
+        <p id="mineru-hint" class="hint"></p>
+        <div class="page-actions">
+          <button type="submit" class="btn primary lg" disabled>保存设置</button>
+          <button type="button" class="btn lg" id="test-mineru-settings" disabled>测试已保存连接</button>
+          <button type="button" class="btn lg" id="clear-mineru-secret" hidden>清除 Secret Key</button>
+          <a class="btn lg" href="https://mineru.net/apiManage/token" target="_blank" rel="noopener noreferrer">去 mineru.net 申请</a>
+        </div>
+        <p id="mineru-settings-result" class="test-result" aria-live="polite" hidden></p>
+      </form>
     </section>
 
     <!-- --------------------------------------------------------------------- mcp -->
@@ -79,6 +164,20 @@
           <p class="lede">本体的全部能力都以 MCP 工具提供。工作台右侧的 agent 用的就是这一套；Claude Code、Claude Desktop 等客户端按下面的配置接入后，能做的事完全一样。接受和拒绝改动是人的决定，不是工具。</p>
         </div>
       </header>
+
+      <section class="ext-mcp" id="ext-mcp" hidden>
+        <div class="ext-head">
+          <div>
+            <h2 class="group-title">外部 MCP 服务 <small id="ext-mcp-count">0</small></h2>
+            <p class="hint">接入后，工作台的 agent 可以直接调用这些服务的工具；在「数据源」里还能把某个工具设成定时采集的数据源，用来盯市场。请求头只保存在本机的 <code id="ext-mcp-file">~/.config/onto-research/mcp.json</code>，页面上只显示末尾 4 位。</p>
+          </div>
+          <button type="button" class="btn primary" id="add-mcp-btn">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+            添加 MCP 服务
+          </button>
+        </div>
+        <div class="grid sources" id="ext-mcp-list"></div>
+      </section>
 
       <div class="mcp-grid">
         <div class="mcp-side">
@@ -118,12 +217,137 @@
   <dialog id="project-dialog">
     <form method="dialog" id="project-form">
       <h2 id="dialog-title">创建本体项目</h2>
-      <label class="field"><span>名称</span><input id="f-name" required maxlength="60" placeholder="例如 ETF 资金流研究" autocomplete="off"></label>
+      <label class="field"><span>名称</span><input id="f-name" required maxlength="60" placeholder="例如 青少年睡眠研究" autocomplete="off"></label>
       <label class="field"><span>描述</span><textarea id="f-desc" rows="3" maxlength="300" placeholder="这个本体关注什么、用来做什么（可选）"></textarea></label>
-      <p class="hint" id="dialog-hint">新项目自带种子类型（资产、叙事、事件、宏观指标……），节点和关系由 agent 帮你搭。</p>
+      <label class="field" id="f-pack-field"><span>类型</span>
+        <select id="f-pack">
+          <option value="research" selected>研究：问题、假设、论断、观测、概念、方法</option>
+          <option value="market">市场监测：资产、叙事、事件、宏观指标、信号</option>
+        </select>
+      </label>
+      <p class="hint" id="dialog-hint">新项目自带所选类型，节点和关系由 agent 帮你搭。以后也可以在项目菜单里加入研究类型。</p>
       <div class="dialog-actions">
         <button type="button" class="btn" value="cancel" id="dialog-cancel">取消</button>
         <button type="submit" class="btn primary" id="dialog-ok">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="bigbang-dialog" class="wide">
+    <form method="dialog" id="bigbang-form">
+      <h2>Big Bang：合并项目</h2>
+      <p class="hint bb-lede">选两个或更多项目，它们的图谱、文献（含 PDF、精读）、摘录、笔记和论文会合并进一个新项目。原项目保持不变。</p>
+      <fieldset class="bb-list" id="bb-list" aria-label="要合并的项目"></fieldset>
+      <label class="field"><span>新项目名称</span><input id="bb-name" maxlength="60" placeholder="留空则用「Big Bang · 项目 A + 项目 B」" autocomplete="off"></label>
+      <label class="field"><span>描述</span><textarea id="bb-desc" rows="2" maxlength="300" placeholder="留空则写明由哪些项目合并而成"></textarea></label>
+      <p class="hint">同类型同名的节点、同一 DOI 的文献会合成一个，笔记里的引用随之改写；引用键撞车的文献会换一个新引用键。PDF 只存一份，由新旧项目共用，合并几乎不占额外空间。对话记录和待审核的改动留在原项目。</p>
+      <p class="bb-error" id="bb-error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="bb-cancel">取消</button>
+        <button type="submit" class="btn primary" id="bb-ok" disabled>合并</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="source-dialog" class="wide">
+    <form method="dialog" id="source-form">
+      <h2 id="source-dialog-title">添加数据源</h2>
+      <label class="field"><span>类型</span>
+        <select name="kind">
+          <option value="json">数值序列 · JSON 接口</option>
+          <option value="csv">数值序列 · CSV 文件</option>
+          <option value="mcp">数值序列 · MCP 工具</option>
+          <option value="rss">新闻 · RSS / Atom</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label class="field"><span>名称</span><input name="title" required maxlength="80" placeholder="例如 国家统计局 CPI" autocomplete="off"></label>
+        <label class="field"><span>标识</span><input name="name" required maxlength="40" pattern="[a-z][a-z0-9_]{1,39}" placeholder="例如 nbs_cpi" autocomplete="off" spellcheck="false"></label>
+      </div>
+      <label class="field" data-for="url"><span>地址</span><input name="url" type="url" required maxlength="1000" placeholder="https://…" autocomplete="off" spellcheck="false"></label>
+      <p class="field-note" data-for="http-series">地址里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填，一个数据源就能服务多个节点。</p>
+
+      <div data-for="mcp">
+        <div class="field-row">
+          <label class="field"><span>MCP 服务</span><select name="server"></select></label>
+          <label class="field"><span>工具</span><input name="tool" list="mcp-tool-names" maxlength="200" placeholder="先选服务，再选工具" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <datalist id="mcp-tool-names"></datalist>
+        <p class="field-note" id="mcp-tool-help" hidden></p>
+        <label class="field"><span>工具参数（JSON）</span><textarea name="arguments" rows="3" maxlength="4000" spellcheck="false" placeholder='例如 {"symbol": "{symbol}"}；不需要参数时留空'></textarea></label>
+        <p class="field-note">字符串里可以用 <code>{symbol}</code> 这样的参数，绑定节点时再填。采集器按「采集间隔」定时调用这个工具，记下它返回的数值。</p>
+      </div>
+
+      <div data-for="rss">
+        <label class="field"><span>语言</span>
+          <select name="lang"><option value="zh">中文</option><option value="en">英文</option></select>
+        </label>
+      </div>
+
+      <div data-for="series">
+        <label class="field" data-for="path"><span>数据所在路径</span><input name="path" maxlength="200" placeholder="例如 data.items；返回值本身就是列表或数值时留空" autocomplete="off" spellcheck="false"></label>
+        <div class="field-row">
+          <label class="field"><span data-label="time">时间字段</span><input name="time" maxlength="100" placeholder="例如 date" autocomplete="off" spellcheck="false"></label>
+          <label class="field"><span data-label="value">数值字段</span><input name="value" maxlength="100" placeholder="例如 close" autocomplete="off" spellcheck="false"></label>
+        </div>
+        <div class="field-row three">
+          <label class="field"><span>时间格式</span>
+            <select name="time_format">
+              <option value="auto">自动识别</option>
+              <option value="iso">日期 / ISO 8601</option>
+              <option value="unix_s">Unix 秒</option>
+              <option value="unix_ms">Unix 毫秒</option>
+            </select>
+          </label>
+          <label class="field"><span>数据频率</span>
+            <select name="frequency">
+              <option value="5m">5 分钟</option><option value="1h">1 小时</option><option value="4h">4 小时</option>
+              <option value="8h">8 小时</option><option value="1d" selected>1 天</option><option value="1w">1 周</option>
+              <option value="1mo">1 月</option><option value="1q">1 季度</option>
+            </select>
+          </label>
+          <label class="field"><span>单位</span><input name="unit" maxlength="20" placeholder="可选" autocomplete="off"></label>
+        </div>
+        <div class="field-row">
+          <label class="field"><span>采集间隔（分钟）</span><input name="poll_minutes" type="number" min="5" max="10080" value="60"></label>
+          <label class="field"><span>首次回补（天）</span><input name="backfill_days" type="number" min="1" max="36500" value="365"></label>
+        </div>
+        <label class="field" data-for="params"><span>测试用参数</span><input name="test_params" placeholder="例如 symbol=600519" autocomplete="off" spellcheck="false"></label>
+      </div>
+
+      <div class="source-test" hidden></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="source-test-btn">测试</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="source-cancel">取消</button>
+        <button type="submit" class="btn primary" id="source-save">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="mcp-dialog" class="wide">
+    <form method="dialog" id="mcp-form">
+      <h2 id="mcp-dialog-title">添加 MCP 服务</h2>
+      <div class="field-row">
+        <label class="field"><span>MCP 名称</span><input name="name" required maxlength="30" pattern="[a-z][a-z0-9_\-]{1,29}" placeholder="例如 market_data" autocomplete="off" spellcheck="false"></label>
+        <label class="field"><span>MCP 类型</span>
+          <select name="transport"><option value="streamable_http">Streamable HTTP</option></select>
+        </label>
+      </div>
+      <p class="field-note">名称会出现在 agent 的工具名里，例如 <code>mcp__market_data__get_quote</code>：只能用小写字母、数字、下划线和连字符（-）。</p>
+      <label class="field"><span>URL</span><input name="url" type="url" required maxlength="1000" placeholder="https://example.com/mcp" autocomplete="off" spellcheck="false"></label>
+      <div class="field">
+        <span>请求头</span>
+        <div class="header-rows" id="mcp-headers"></div>
+        <button type="button" class="link add-header" id="mcp-add-header">+ 添加请求头</button>
+      </div>
+      <label class="check"><input type="checkbox" name="enabled" checked> 启用：agent 可以使用这个服务的工具</label>
+      <div class="source-test" id="mcp-test-box" hidden></div>
+      <div class="dialog-actions">
+        <button type="button" class="btn" id="mcp-test-btn">测试连接</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="mcp-cancel">取消</button>
+        <button type="submit" class="btn primary" id="mcp-save">保存</button>
       </div>
     </form>
   </dialog>

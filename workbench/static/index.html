@@ -38,7 +38,15 @@
         <h1><a href="/" class="crumb">本体项目</a><span class="crumb-sep">/</span><span id="project-name">…</span></h1>
         <p class="stats"><span>ONTOLOGY</span><span id="stat-nodes">0</span> 节点<span id="stat-links">0</span> 关系<span id="stat-feeds">0</span> 数据流</p>
       </div>
+      <div id="modes" class="seg glass" role="radiogroup" aria-label="模式">
+        <button type="button" role="radio" data-mode="graph" aria-checked="true">图谱</button>
+        <button type="button" role="radio" data-mode="library" aria-checked="false">文献</button>
+        <button type="button" role="radio" data-mode="writing" aria-checked="false">写作</button>
+      </div>
     </header>
+
+    <section id="library" class="glass" aria-label="文献库" hidden></section>
+    <section id="writing" class="glass" aria-label="写作" hidden></section>
 
     <div id="review-wrap" hidden>
       <button type="button" id="review-pill" aria-expanded="false" aria-controls="review-pop">
@@ -145,6 +153,7 @@
     <section id="report-view" hidden aria-live="polite">
       <div class="rp-bar">
         <span id="rp-status" class="rp-status"></span>
+        <button type="button" id="rp-insert" class="btn sm" hidden>插入论文</button>
         <button type="button" id="rp-regen" class="btn sm">重新生成</button>
       </div>
       <article id="report-body" class="rp-body"></article>

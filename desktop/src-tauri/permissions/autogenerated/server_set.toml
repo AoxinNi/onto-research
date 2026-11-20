@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-server-set"
+description = "Enables the server_set command without any pre-configured scope."
+commands.allow = ["server_set"]
+
+[[permission]]
+identifier = "deny-server-set"
+description = "Denies the server_set command without any pre-configured scope."
+commands.deny = ["server_set"]

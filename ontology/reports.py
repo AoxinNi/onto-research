@@ -60,10 +60,7 @@ REPORT_TOOL = {
     },
 }
 
-SYSTEM = """You are the research desk's writer. Write a concise research report in Chinese from the knowledge graph
-digest you are given, the way a sell-side strategist writes a market note: lead with the conclusion, then the
-drivers, then risks and what to watch.
-Rules:
+RULES = """Rules:
 - Use only facts in the digest. Quote numbers exactly as given (with their units and dates); never invent data.
 - Every sentence must either cite the node and link ids it rests on, or list in `from` the earlier sentences it is
   inferred from (or both). Conclusions and judgements should be inferences with `from`, so the reasoning chain is
@@ -71,6 +68,22 @@ Rules:
 - Relationships rest on links: cite the link id when a sentence uses one. Weak or "仅模型常识" links should be
   stated with hedging; strong evidence can be stated plainly. Association is not causation.
 - 4 to 6 sections, 12 to 30 sentences in total. Short sentences. No bullet characters inside sentences."""
+
+# How the report reads, by the project's primary type pack.
+STYLES = {
+    "market": """You are the research desk's writer. Write a concise research report in Chinese from the knowledge
+graph digest you are given, the way a sell-side strategist writes a market note: lead with the conclusion, then the
+drivers, then risks and what to watch.""",
+    "research": """You are writing a research progress review in Chinese from the knowledge graph digest you are
+given, the way a careful academic writes the state of a question: for each research question, say what the
+hypotheses are, which observations and claims support, contradict or qualify them, and where the evidence is thin.
+Close with the open gaps and what would settle them. Keep findings (Observation), assertions (Claim, noting whether
+they come from the literature or the project) and untested ideas (Hypothesis) clearly apart.""",
+}
+
+
+def system_prompt(packs: list[str]) -> str:
+    return STYLES.get(packs[0] if packs else "market", STYLES["market"]) + "\n" + RULES
 
 
 # ------------------------------------------------------------------ digest and fingerprint
@@ -218,7 +231,7 @@ def write(store: OntologyStore, client: Any = None, trigger: str = "manual") -> 
     try:
         client = client or anthropic.Anthropic()
         r = client.messages.create(
-            model=model, max_tokens=12000, system=SYSTEM, tools=[REPORT_TOOL],
+            model=model, max_tokens=12000, system=system_prompt(store.project_packs()), tools=[REPORT_TOOL],
             tool_choice={"type": "tool", "name": REPORT_TOOL["name"]},
             messages=[{"role": "user", "content": "图谱摘要（JSON）：\n" + json.dumps(d, ensure_ascii=False)}],
         )

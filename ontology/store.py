@@ -19,7 +19,8 @@ from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ValidationError, model_validator
 
 from .errors import OntologyError
-from .registry import LinkType, ObjectType, Registry, build_registry, load_seed, parse_type
+from .registry import (LEGACY_PACK, LinkType, ObjectType, Registry, build_registry, load_seed, pack_guidance,
+                       parse_type)
 from .evidence import summaries
 from .providers import PROVIDERS
 from .series import SeriesStore, load_templates
@@ -36,7 +37,13 @@ LINK_COLS = [
 BINDING_COLS = [
     "id", "node_id", "series_id", "role", "provenance", "rationale", "status", "changeset_id", "created_at", "updated_at",
 ]
-TABLE_COLS = {"objects": OBJ_COLS, "links": LINK_COLS, "bindings": BINDING_COLS}
+GROUNDING_COLS = [
+    "id", "node_id", "link_id", "item_id", "excerpt_id", "stance", "rationale", "provenance", "status", "changeset_id",
+    "created_at", "updated_at",
+]
+TABLE_COLS = {"objects": OBJ_COLS, "links": LINK_COLS, "bindings": BINDING_COLS, "groundings": GROUNDING_COLS}
+# How a library source relates to a node or link: it makes the claim, backs it, argues against it, or limits it.
+STANCES = ("states", "supports", "contradicts", "qualifies")
 OPEN_STATUSES = ("open", "pending")
 ROLE = re.compile(r"^[a-z][a-z_]{1,23}$")
 MAX_DEPTH = 3
@@ -95,10 +102,22 @@ class OntologyStore:
 
     # ------------------------------------------------------------------ types
 
-    def sync_seed_types(self) -> None:
-        """Make the seed YAML the accepted definition of every type it names."""
+    def project_packs(self) -> list[str]:
+        """The type packs of the project this connection points at (its search_path schema). A schema outside
+        the project registry (the CLI's legacy single database, tests) counts as a market project."""
+        has_column = self.conn.execute(
+            """SELECT 1 FROM information_schema.columns WHERE table_schema = 'onto_research'
+               AND table_name = 'projects' AND column_name = 'packs'"""
+        ).fetchone()
+        row = has_column and self.conn.execute(
+            "SELECT packs FROM onto_research.projects WHERE schema_name = current_schema()"
+        ).fetchone()
+        return list(row["packs"] if row else []) or [LEGACY_PACK]
+
+    def sync_seed_types(self, packs: list[str] | None = None) -> None:
+        """Make the seed YAML of the project's type packs the accepted definition of every type they name."""
         with self.conn.transaction():
-            for t in load_seed():
+            for t in load_seed(packs or self.project_packs()):
                 self.conn.execute(
                     """INSERT INTO types (kind, name, spec, status, source)
                        VALUES (%s, %s, %s, 'accepted', 'seed')
@@ -114,6 +133,8 @@ class OntologyStore:
 
     def get_schema(self) -> dict[str, Any]:
         out = self.registry.describe()
+        out["packs"] = self.project_packs()
+        out["guidance"] = pack_guidance(out["packs"])
         out["proposed_types"] = self.conn.execute(
             "SELECT kind, name, spec, justification, proposed_by FROM types WHERE status = 'proposed' ORDER BY created_at"
         ).fetchall()
@@ -262,6 +283,13 @@ class OntologyStore:
                     self.conn.execute(
                         "DELETE FROM bindings WHERE changeset_id IS NULL AND node_id = ANY(%s)", (created_nodes,)
                     )
+                created_links = [op["target_id"] for op in ops if op["target_table"] == "links" and op["before"] is None]
+                if created_nodes or created_links:
+                    # So were groundings a person added directly to what this changeset created.
+                    self.conn.execute(
+                        "DELETE FROM groundings WHERE changeset_id IS NULL AND (node_id = ANY(%s) OR link_id = ANY(%s))",
+                        (created_nodes, created_links),
+                    )
                 for op in ops:
                     table, cols = op["target_table"], TABLE_COLS[op["target_table"]]
                     if op["before"] is None:
@@ -373,6 +401,7 @@ class OntologyStore:
              "other": {"id": r["to_id"] if r["outgoing"] else r["from_id"], "name": r["other_name"], "type": r["other_type"]}}
             for r in rows
         ]
+        node["groundings"] = self.groundings(target_id=node_id)
         return node
 
     def get_neighbors(
@@ -697,7 +726,16 @@ class OntologyStore:
                 row = self._link_row(target_id)
                 if row["status"] != "active":
                     raise OntologyError(f"link '{target_id}' is already archived")
+                archived = self._archive_groundings("link_id", target_id, rationale)
                 self._update_link(row, {"status": "archived"}, "archive", rationale)
+                return {"archived": [target_id, *archived]}
+            if target_id.startswith("g_"):
+                row = self._grounding_row(target_id)
+                if row["status"] != "active":
+                    raise OntologyError(f"grounding '{target_id}' is already archived")
+                # A grounding a person added directly is removed directly by a person; anything else is reviewed.
+                direct = row["changeset_id"] is None and self.actor == "human"
+                self._update_grounding(row, {"status": "archived"}, "archive", rationale, direct=direct)
                 return {"archived": [target_id]}
             if target_id.startswith("b_"):
                 row = self._binding_row(target_id)
@@ -712,9 +750,11 @@ class OntologyStore:
             ).fetchall():
                 self._update_binding(b, {"status": "archived"}, "archive", rationale)
                 archived.append(b["id"])
+            archived += self._archive_groundings("node_id", target_id, rationale)
             for l in self.conn.execute(
                 "SELECT * FROM links WHERE status = 'active' AND (from_id = %s OR to_id = %s)", (target_id, target_id)
             ).fetchall():
+                archived += self._archive_groundings("link_id", l["id"], rationale)
                 self._update_link(l, {"status": "archived"}, "archive", rationale)
                 archived.append(l["id"])
             self._update_object(row, {"status": "archived"}, "archive", rationale)
@@ -754,6 +794,15 @@ class OntologyStore:
                     self._update_binding(b, {"status": "archived"}, "merge_nodes", rationale)
                 else:
                     self._update_binding(b, {"node_id": keep_id}, "merge_nodes", rationale)
+            for g in self.conn.execute(
+                "SELECT * FROM groundings WHERE status = 'active' AND node_id = %s", (drop_id,)
+            ).fetchall():
+                clash = self.conn.execute(
+                    """SELECT 1 FROM groundings WHERE status = 'active' AND node_id = %s AND item_id = %s
+                       AND coalesce(excerpt_id, '') = coalesce(%s, '') AND stance = %s""",
+                    (keep_id, g["item_id"], g["excerpt_id"], g["stance"]),
+                ).fetchone()
+                self._update_grounding(g, {"status": "archived"} if clash else {"node_id": keep_id}, "merge_nodes", rationale)
             aliases = [a for a in [drop["name"], *drop["aliases"], *keep["aliases"]] if a != keep["name"]]
             self._update_object(
                 keep,
@@ -884,6 +933,130 @@ class OntologyStore:
                 made.append(r["binding"])
         return made
 
+    # ------------------------------------------------------------- groundings
+
+    def _grounding_row(self, grounding_id: str) -> dict[str, Any]:
+        row = self.conn.execute("SELECT * FROM groundings WHERE id = %s FOR UPDATE", (grounding_id,)).fetchone()
+        if not row:
+            raise OntologyError(f"no grounding '{grounding_id}'")
+        return row
+
+    def _update_grounding(self, row: dict[str, Any], changes: dict[str, Any], op: str, rationale: str,
+                          *, direct: bool = False) -> None:
+        sets = ", ".join(f"{k} = %s" for k in changes)
+        values = [Jsonb(v) if k == "provenance" else v for k, v in changes.items()]
+        if direct:
+            self.conn.execute(f"UPDATE groundings SET {sets}, updated_at = now() WHERE id = %s", (*values, row["id"]))
+            return
+        cs = self._changeset()
+        before = self._image("groundings", row["id"])
+        self.conn.execute(
+            f"UPDATE groundings SET {sets}, changeset_id = %s, updated_at = now() WHERE id = %s", (*values, cs, row["id"])
+        )
+        self._log(cs, op, "groundings", row["id"], before, rationale)
+
+    def _archive_groundings(self, column: str, target_id: str, rationale: str) -> list[str]:
+        """Groundings go with the node or link they hang on; reviewed with it, so an undo brings them back."""
+        rows = self.conn.execute(
+            f"SELECT * FROM groundings WHERE status = 'active' AND {column} = %s", (target_id,)
+        ).fetchall()
+        for g in rows:
+            self._update_grounding(g, {"status": "archived"}, "archive", rationale)
+        return [g["id"] for g in rows]
+
+    def _ground(self, target_id: str, item_id: str, stance: str, rationale: str, excerpt_id: str | None,
+                provenance: dict[str, Any] | None, *, direct: bool) -> dict[str, Any]:
+        if stance not in STANCES:
+            raise OntologyError(f"stance must be one of {list(STANCES)}")
+        if not rationale.strip():
+            raise OntologyError("rationale is required: say how this source bears on it")
+        with self.conn.transaction():
+            if target_id.startswith("l_"):
+                link = self._link_row(target_id)
+                if link["status"] != "active":
+                    raise OntologyError(f"link '{target_id}' is archived")
+                node_id, link_id = None, target_id
+            else:
+                node_id, link_id = self._active_object(target_id)["id"], None
+            item = self.conn.execute("SELECT id, status, title FROM library_items WHERE id = %s", (item_id,)).fetchone()
+            if not item or item["status"] != "active":
+                raise OntologyError(f"no library item '{item_id}'; use search_library to find ids")
+            if excerpt_id:
+                ex = self.conn.execute("SELECT item_id FROM excerpts WHERE id = %s", (excerpt_id,)).fetchone()
+                if not ex or ex["item_id"] != item_id:
+                    raise OntologyError(f"excerpt '{excerpt_id}' is not from {item_id}")
+            same = self.conn.execute(
+                """SELECT id FROM groundings WHERE status = 'active' AND coalesce(node_id, link_id) = %s AND item_id = %s
+                   AND coalesce(excerpt_id, '') = coalesce(%s, '') AND stance = %s""",
+                (target_id, item_id, excerpt_id, stance),
+            ).fetchone()
+            if same:
+                return {"grounding": self.get_grounding(same["id"]), "created": False}
+            prov = _provenance(provenance or ({"kind": "user"} if direct else
+                                              {"kind": "data_source", "ref": f"library:{item_id}"}))
+            gid = _new_id("g")
+            cs = None if direct else self._changeset()
+            self.conn.execute(
+                """INSERT INTO groundings (id, node_id, link_id, item_id, excerpt_id, stance, rationale, provenance,
+                                           status, changeset_id)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'active', %s)""",
+                (gid, node_id, link_id, item_id, excerpt_id, stance, rationale, Jsonb(prov), cs),
+            )
+            if cs:
+                self._log(cs, "ground", "groundings", gid, None, rationale)
+            return {"grounding": self.get_grounding(gid), "created": True}
+
+    def ground(self, target_id: str, item_id: str, stance: str, rationale: str, excerpt_id: str | None = None,
+               provenance: dict[str, Any] | None = None) -> dict[str, Any]:
+        """A library source backs, argues against or limits a node or link. Goes into the actor's changeset."""
+        return self._ground(target_id, item_id, stance, rationale, excerpt_id, provenance, direct=False)
+
+    def ground_direct(self, target_id: str, item_id: str, stance: str, rationale: str, excerpt_id: str | None = None,
+                      provenance: dict[str, Any] | None = None) -> dict[str, Any]:
+        """A grounding a person adds while reading: in effect at once, outside any changeset."""
+        return self._ground(target_id, item_id, stance, rationale, excerpt_id, provenance, direct=True)
+
+    def get_grounding(self, grounding_id: str) -> dict[str, Any]:
+        rows = self.groundings(ids=[grounding_id], include_archived=True)
+        if not rows:
+            raise OntologyError(f"no grounding '{grounding_id}'")
+        return rows[0]
+
+    def groundings(self, target_id: str | None = None, item_id: str | None = None, ids: list[str] | None = None,
+                   include_archived: bool = False) -> list[dict[str, Any]]:
+        """Groundings with the source's citation and the excerpt's text, newest first."""
+        rows = self.conn.execute(
+            """SELECT g.*, i.citekey, i.title AS item_title, i.authors, i.year, e.quote, e.page, e.verified,
+                      c.status AS cs_status
+               FROM groundings g JOIN library_items i ON i.id = g.item_id
+               LEFT JOIN excerpts e ON e.id = g.excerpt_id LEFT JOIN changesets c ON c.id = g.changeset_id
+               WHERE (%(all)s OR g.status = 'active')
+                 AND (%(t)s::text IS NULL OR coalesce(g.node_id, g.link_id) = %(t)s)
+                 AND (%(i)s::text IS NULL OR g.item_id = %(i)s)
+                 AND (%(ids)s::text[] IS NULL OR g.id = ANY(%(ids)s))
+               ORDER BY g.created_at DESC""",
+            {"all": include_archived, "t": target_id, "i": item_id, "ids": ids},
+        ).fetchall()
+        return [{"id": r["id"], "target_id": r["node_id"] or r["link_id"], "item_id": r["item_id"],
+                 "citekey": r["citekey"], "item_title": r["item_title"], "authors": r["authors"], "year": r["year"],
+                 "excerpt_id": r["excerpt_id"], "quote": r["quote"], "page": r["page"], "verified": r["verified"],
+                 "stance": r["stance"], "rationale": r["rationale"], "provenance": r["provenance"],
+                 "status": r["status"], "pending": r["cs_status"] in OPEN_STATUSES} for r in rows]
+
+    def grounding_summary(self) -> dict[str, dict[str, Any]]:
+        """Per node or link: how many active groundings of each stance, and whether any is still pending."""
+        out: dict[str, dict[str, Any]] = {}
+        for r in self.conn.execute(
+            """SELECT coalesce(g.node_id, g.link_id) AS target, g.stance, count(*) AS n,
+                      bool_or(c.status IN ('open', 'pending')) AS pending
+               FROM groundings g LEFT JOIN changesets c ON c.id = g.changeset_id
+               WHERE g.status = 'active' GROUP BY 1, 2"""
+        ):
+            entry = out.setdefault(r["target"], {"pending": False})
+            entry[r["stance"]] = r["n"]
+            entry["pending"] = entry["pending"] or bool(r["pending"])
+        return out
+
     # ------------------------------------------------------------------ graph
 
     def graph(self, include_archived: bool = False) -> dict[str, Any]:
@@ -892,7 +1065,8 @@ class OntologyStore:
         nodes = self.conn.execute(f"SELECT * FROM objects WHERE status IN {status} ORDER BY created_at").fetchall()
         links = self.conn.execute(f"SELECT * FROM links WHERE status IN {status} ORDER BY created_at").fetchall()
         return {"nodes": [self._node_out(n) for n in nodes], "links": [self._link_out(l) for l in links],
-                "data": self.series.node_data(), "evidence": summaries(self.conn)}
+                "data": self.series.node_data(), "evidence": summaries(self.conn),
+                "groundings": self.grounding_summary()}
 
 
 def _spec(t: ObjectType | LinkType) -> dict[str, Any]:
@@ -912,6 +1086,8 @@ def _op_summary(o: dict[str, Any]) -> dict[str, Any]:
     img = o["after"] or o["before"] or {}
     if o["target_table"] == "bindings":
         label = f"binding {img.get('role')}: {img.get('node_id')} -> {img.get('series_id')}"
+    elif o["target_table"] == "groundings":
+        label = f"依据 {img.get('stance')}: {img.get('item_id')} -> {img.get('node_id') or img.get('link_id')}"
     else:
         label = img.get("name") or f"{img.get('type')} {img.get('from_id')} -> {img.get('to_id')}"
     return {"op": o["op"], "table": o["target_table"], "id": o["target_id"], "label": label,

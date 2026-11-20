@@ -16,7 +16,7 @@ import yaml
 from psycopg.types.json import Jsonb
 
 from .errors import OntologyError
-from .sources import FREQ_SECONDS, Obs, series_key, source
+from .sources import FREQ_SECONDS, SOURCES, Obs, series_key, source
 
 TEMPLATES = Path(__file__).parent / "schema" / "bindings.yaml"
 SPARK_POINTS = 60
@@ -71,7 +71,8 @@ class SeriesStore:
                WHERE b.status = 'active' AND (b.changeset_id IS NULL OR c.status = 'accepted')
                ORDER BY s.created_at"""
         ).fetchall()
-        return [r for r in rows if source(r["source"]).polled]
+        # A series whose source was removed from the catalog keeps its points but is no longer fetched.
+        return [r for r in rows if (src := SOURCES.get(r["source"])) is not None and src.polled]
 
     def write(self, series_id: str, points: list[Obs]) -> int:
         """Upsert points; returns how many were new or changed."""
@@ -127,7 +128,8 @@ class SeriesStore:
             """SELECT ts, value, payload FROM observations WHERE series_id = %s AND (%s::timestamptz IS NULL OR ts <= %s)
                ORDER BY ts DESC LIMIT 1""", (s["id"], as_of, as_of)
         ).fetchone()
-        polled = source(s["source"]).polled
+        src = SOURCES.get(s["source"])  # None: a source removed from the catalog
+        polled = src is not None and src.polled
         if not latest:
             out["stale"] = polled
             return out
@@ -153,7 +155,7 @@ class SeriesStore:
             vals = [vals[int(i * stride)] for i in range(SPARK_POINTS - 1)] + [vals[-1]]
         out["spark"] = vals
         # Monthly macro data is published weeks after the period it describes; allow for that.
-        grace = (timedelta(seconds=step * 3) + source(s["source"]).lag
+        grace = (timedelta(seconds=step * 3) + (src.lag if src else timedelta(0))
                  + (timedelta(days=45) if step >= 86400 * 28 else timedelta(0)))
         out["stale"] = polled and (as_of or datetime.now(UTC)) - latest["ts"] > grace
         return out

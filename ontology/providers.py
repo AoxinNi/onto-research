@@ -13,18 +13,29 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .errors import OntologyError
 
-ENV_FILE = Path(os.environ.get("ENV_FILE") or Path(__file__).resolve().parent.parent / ".env")
+def _default_env_file() -> Path:
+    """The project's .env in a source checkout. The desktop app's bundled server has no checkout (its files are
+    unpacked into a temporary folder), so its keys live in the app's data folder, next to the database."""
+    if getattr(sys, "frozen", False):
+        from .localdb import data_dir
+
+        return data_dir() / ".env"
+    return Path(__file__).resolve().parent.parent / ".env"
+
+
+ENV_FILE = Path(os.environ.get("ENV_FILE") or _default_env_file())
 
 CATEGORIES = {"crypto": "加密市场", "onchain": "链上数据", "macro": "宏观经济", "a-share": "A 股", "news": "新闻资讯", "social": "社交媒体",
-              "internal": "内部计算"}
+              "parsing": "文档解析", "internal": "内部计算"}
 
 
 @dataclass
@@ -37,8 +48,12 @@ class Provider:
     auth_env: str | None = None   # environment variable holding the API key; None: no key needed
     min_interval: float = 0.0     # seconds between requests, enforced per process
     note: str = ""
+    settings_view: str | None = None  # configured on that workbench page instead of with a key in .env
+    state: Callable[[], tuple[bool, str | None]] | None = None  # (configured, key hint) for such a provider
 
     def configured(self) -> bool:
+        if self.state:
+            return self.state()[0]
         return not self.auth_env or bool(os.environ.get(self.auth_env, "").strip())
 
     def key(self) -> str | None:
@@ -47,11 +62,21 @@ class Provider:
     def describe(self) -> dict[str, Any]:
         return {"id": self.id, "name": self.name, "category": self.category, "category_name": CATEGORIES.get(self.category),
                 "homepage": self.homepage, "docs": self.docs, "auth_env": self.auth_env, "configured": self.configured(),
-                "min_interval": self.min_interval, "note": self.note, "key_hint": self.key_hint()}
+                "min_interval": self.min_interval, "note": self.note, "key_hint": self.key_hint(),
+                "settings_view": self.settings_view}
 
     def key_hint(self) -> str | None:
+        if self.state:
+            return self.state()[1]
         k = self.key()
         return f"••••{k[-4:]}" if k and len(k) >= 8 else ("已设置" if k else None)
+
+
+def _mineru_state() -> tuple[bool, str | None]:
+    from . import mineru
+
+    s = mineru.settings()
+    return s["ready"], s["secret_hint"] or s["env_hint"]
 
 
 PROVIDERS: dict[str, Provider] = {p.id: p for p in [
@@ -72,6 +97,10 @@ PROVIDERS: dict[str, Provider] = {p.id: p for p in [
              min_interval=0.35, note="Tron 上的 USDT 冻结事件；免密钥可用，设 TRON_API_KEY 提高限额"),
     Provider("rss", "新闻 RSS", "news", "", note="CoinDesk、Cointelegraph、Decrypt、The Block、Bitcoin Magazine、PANews"),
     Provider("grok", "X（经 Grok）", "social", "https://x.ai", note="search_x 工具经 magpie 调用 Grok 的 x_search；需要 magpie 里配置 Grok"),
+    Provider("mineru", "MinerU 文档解析", "parsing", "https://mineru.net", "https://mineru.net/apiManage/docs",
+             settings_view="settings", state=_mineru_state,
+             note="把文献库里的 PDF 转成 Markdown 和图表，供「精读」生成解读；PDF 会上传到 mineru.net。"
+                  "在「平台设置」里填写 Key ID 和 Secret Key，或换成自建服务的地址"),
     Provider("manual", "手动导入", "internal", "", note="python -m ontology.cli import-csv"),
     Provider("internal", "内部计算", "internal", "", note="新闻热度、新闻情绪等派生序列"),
 ]}
@@ -107,6 +136,7 @@ def save_key(provider_id: str, value: str, env_file: Path | None = None) -> Prov
     kept = [ln for ln in lines if not pattern.match(ln)]
     if value:
         kept.append(f"{p.auth_env}={value}")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(kept) + "\n", encoding="utf-8")
     path.chmod(0o600)
     if value:

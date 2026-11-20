@@ -153,6 +153,22 @@ def test_manual_csv_import(store, human, tmp_path):
     assert store.series.collectable() == []  # manual series are never polled
 
 
+def test_a_source_removed_from_the_catalog_keeps_its_points_but_is_not_fetched(store, human, fake):
+    from ontology import collector
+
+    btc = node(store, "Metric", "测试指标")  # no binding template matches it
+    store.propose_binding(btc["id"], "fake", {"symbol": "BTC"}, "level", "数值")
+    human.accept_changeset(store.submit_changeset("node + binding")["id"])
+    collector.run_once(store.conn)
+    assert len(store.series.collectable()) == 1
+
+    del sources.SOURCES["fake"]  # the connector is gone; the project still has the binding and its points
+    assert store.series.collectable() == []
+    assert collector.run_once(store.conn) is not None
+    shown = store.list_bindings(btc["id"])[0]
+    assert shown["latest"] is not None and shown["stale"] is False
+
+
 def test_parsers_on_recorded_payloads():
     k = sources.parse_klines([[1792382400000, "82530.8", "82882.0", "82484.2", "82783.5", "407.5", 0, "0", 0, "0", "0", "0"]])
     assert k[0].value == 82783.5 and k[0].payload["h"] == 82882.0 and k[0].ts.hour == (1792382400 // 3600) % 24

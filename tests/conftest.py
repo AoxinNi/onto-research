@@ -19,10 +19,50 @@ LLM = {"kind": "llm_prior"}
 USER = {"kind": "user"}
 
 
+@pytest.fixture(autouse=True)
+def _no_resolver_network(monkeypatch):
+    """Metadata lookups never leave the machine in tests; a test that needs one patches resolve._fetch itself."""
+    from ontology import resolve
+
+    def refuse(*a, **k):
+        raise AssertionError("a test tried to reach a metadata service")
+
+    monkeypatch.setattr(resolve, "_fetch", refuse)
+
+
+@pytest.fixture(autouse=True)
+def _own_mcp_servers(monkeypatch, tmp_path):
+    """Each test gets an empty MCP server list of its own, never the one in ~/.config."""
+    from ontology import mcp_clients
+
+    monkeypatch.setenv(mcp_clients.ENV, str(tmp_path / "mcp.json"))
+    mcp_clients._tools.clear()
+
+
+@pytest.fixture(autouse=True)
+def _own_paper_cache(monkeypatch, tmp_path):
+    """MinerU conversions go to a cache folder of the test's own, and no test talks to mineru.net."""
+    from ontology import mineru
+
+    monkeypatch.setenv(mineru.ENV_CACHE, str(tmp_path / "papers"))
+    monkeypatch.setenv(mineru.ENV_SETTINGS, str(tmp_path / "mineru.json"))
+    monkeypatch.delenv(mineru.ENV_KEY, raising=False)
+    monkeypatch.delenv(mineru.ENV_URL, raising=False)
+    monkeypatch.setattr(mineru, "POLL_SECONDS", 0)
+
+    def refuse(request):
+        raise AssertionError("a test tried to reach MinerU")
+
+    import httpx
+    monkeypatch.setattr(mineru, "TEST_TRANSPORT", httpx.MockTransport(refuse))
+
+
 @pytest.fixture
 def conn():
     params = conninfo_to_dict(TEST_URL)
-    if params.get("dbname") != "onto_research_test" or params.get("host") not in {"127.0.0.1", "localhost", "::1"}:
+    host = params.get("host") or ""
+    local = host in {"127.0.0.1", "localhost", "::1"} or host.startswith("/")  # a Unix socket: the embedded server
+    if params.get("dbname") != "onto_research_test" or not local:
         pytest.fail("Tests require the dedicated local onto_research_test database.")
     c = connect(TEST_URL)
     for r in c.execute("SELECT nspname FROM pg_namespace WHERE starts_with(nspname, 'onto_research_p_')").fetchall():
